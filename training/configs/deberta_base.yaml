@@ -1,0 +1,40 @@
+# ─────────────────────────────────────────────────────────────
+#  DeBERTa-v3-base  |  JD Bias Token Classifier
+#  Optimised for cloud GPU (T4 / V100 / A100)
+# ─────────────────────────────────────────────────────────────
+
+# ── Model ─────────────────────────────────────────────────────
+base_model:  microsoft/deberta-v3-base
+output_dir:  models/deberta-jd-bias-v1
+
+# ── Training schedule ─────────────────────────────────────────
+epochs:                 5
+batch_size:             16          # T4 (16GB): 16 | A100: 32
+grad_accum:             2           # effective batch = batch_size × grad_accum
+lr:                     2.0e-5
+weight_decay:           0.01
+warmup_ratio:           0.1
+lr_scheduler:           linear
+max_grad_norm:          1.0
+
+# ── Sequence length ───────────────────────────────────────────
+max_length:             256         # Most JDs < 256 tokens; saves memory vs 512
+
+# ── Precision (set bf16: true for A100 / H100) ───────────────
+fp16:                   true
+bf16:                   false
+
+# ── Early stopping ────────────────────────────────────────────
+early_stopping_patience: 2
+
+# ── Logging ───────────────────────────────────────────────────
+logging_steps:          50
+report_to:              wandb       # set to "none" if no W&B account
+
+# ── HuggingFace Hub (optional) ────────────────────────────────
+push_to_hub:            false
+hub_model_id:           YOUR_HF_USERNAME/jd-bias-detector-deberta
+
+# ── Reproducibility ───────────────────────────────────────────
+seed:                   42
+dataloader_workers:     2

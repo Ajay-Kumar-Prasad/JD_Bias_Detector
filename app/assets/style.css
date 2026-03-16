@@ -1,0 +1,67 @@
+/* ── Global resets ─────────────────────────────────────────── */
+[data-testid="stAppViewContainer"] { font-family: "Inter", sans-serif; }
+[data-testid="stSidebar"] { background: #f8f8f6; }
+
+/* ── Text area ─────────────────────────────────────────────── */
+textarea { font-size: 14px !important; line-height: 1.7 !important; }
+
+/* ── Score ring ────────────────────────────────────────────── */
+.score-ring {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 90px; height: 90px;
+    border-radius: 50%;
+    font-size: 26px; font-weight: 700;
+    border: 5px solid;
+    margin: 0 auto 8px;
+}
+.score-high   { border-color: #5DCAA5; color: #0F6E56; }
+.score-medium { border-color: #FAC775; color: #854F0B; }
+.score-low    { border-color: #F0997B; color: #993C1D; }
+
+/* ── Flag cards ────────────────────────────────────────────── */
+.flag-card {
+    border: 1px solid #e0ddd6;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 10px;
+    background: #fafaf8;
+}
+.flag-card:hover { border-color: #b4b2a9; }
+.flag-phrase {
+    font-size: 16px; font-weight: 600;
+    margin-bottom: 6px;
+}
+.flag-meta {
+    font-size: 12px; color: #5f5e5a;
+    margin-bottom: 8px;
+}
+.flag-explanation { font-size: 14px; margin-bottom: 8px; line-height: 1.6; }
+.flag-rewrite {
+    display: inline-block;
+    background: #eaf3de; color: #3B6D11;
+    border-radius: 5px; padding: 3px 10px;
+    font-size: 13px; font-weight: 500;
+}
+
+/* ── Diff columns ──────────────────────────────────────────── */
+.diff-col {
+    border: 1px solid #e0ddd6;
+    border-radius: 10px;
+    padding: 14px 16px;
+    background: #fafaf8;
+    min-height: 120px;
+}
+.diff-col h4 { font-size: 13px; color: #888780; margin-bottom: 10px; }
+
+/* ── Download button ───────────────────────────────────────── */
+[data-testid="stDownloadButton"] button {
+    background: #1D9E75 !important;
+    color: white !important;
+    border: none !important;
+    border-radius: 8px !important;
+}
+
+/* ── Metric cards ──────────────────────────────────────────── */
+[data-testid="stMetricValue"] { font-size: 28px !important; }

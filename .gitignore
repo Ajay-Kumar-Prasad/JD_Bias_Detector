@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+
+# Models & data
+models/
+data/raw/
+*.bin
+*.safetensors
+*.onnx
+ 
+# Env
+.env
+*.env
+ 
+# Notebooks
+.ipynb_checkpoints/
+ 
+# Logs & runs
+wandb/
+mlruns/
+logs/
+*.log
+ 
+# OS
+.DS_Store
+Thumbs.db
