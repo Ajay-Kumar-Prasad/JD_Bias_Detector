@@ -22,12 +22,34 @@ from transformers import (
 )
 from .dataset import BiasDataset, LABEL2ID, ID2LABEL, NUM_LABELS
 from .utils import compute_metrics
+from collections import Counter
+import json
+import torch
+from torch.nn import CrossEntropyLoss
+from transformers import Trainer
 
 
 def load_config(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
 
+def compute_class_weights(path, label2id):
+    counts = Counter()
+
+    with open(path) as f:
+        for line in f:
+            if line.strip():
+                counts.update(json.loads(line)["labels"])
+
+    total = sum(counts.values())
+    weights = torch.ones(len(label2id))
+
+    for lbl, idx in label2id.items():
+        if lbl == "O":
+            continue
+        weights[idx] = min(10.0, total / max(1, counts[lbl]))
+
+    return weights
 
 def build_model_and_tokenizer(cfg: dict):
     print(f"⬇  Loading base model: {cfg['base_model']}")
@@ -66,7 +88,7 @@ def build_training_args(cfg: dict) -> TrainingArguments:
         save_total_limit=2,
 
         # ── Precision (use fp16 on NVIDIA, bf16 on A100/H100)
-        fp16=cfg.get("fp16", torch.cuda.is_available()),
+        fp16=cfg.get("fp16", False) and torch.cuda.is_available(),
         bf16=cfg.get("bf16", False),
 
         # ── Logging ────────────────────────────────────────
@@ -81,7 +103,28 @@ def build_training_args(cfg: dict) -> TrainingArguments:
         hub_model_id=cfg.get("hub_model_id", None),
     )
 
+class WeightedTrainer(Trainer):
+    def __init__(self, *args, class_weights=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.class_weights = class_weights
 
+    def compute_loss(self, model, inputs, return_outputs=False):
+        labels = inputs.pop("labels")
+        outputs = model(**inputs)
+        logits = outputs.logits
+
+        loss_fct = CrossEntropyLoss(
+            weight=self.class_weights,
+            ignore_index=-100
+        )
+
+        loss = loss_fct(
+            logits.view(-1, logits.size(-1)),
+            labels.view(-1)
+        )
+
+        return (loss, outputs) if return_outputs else loss
+    
 def main(config_path: str):
     cfg = load_config(config_path)
     print(f"\n{'='*55}")
@@ -116,7 +159,12 @@ def main(config_path: str):
             EarlyStoppingCallback(early_stopping_patience=cfg["early_stopping_patience"])
         )
 
-    trainer = Trainer(
+    class_weights = compute_class_weights(
+        "data/annotated/train.jsonl",
+        LABEL2ID
+    ).to(model.device)
+
+    trainer = WeightedTrainer(
         model=model,
         args=training_args,
         train_dataset=train_ds,
@@ -125,6 +173,7 @@ def main(config_path: str):
         data_collator=data_collator,
         compute_metrics=compute_metrics,
         callbacks=callbacks,
+        class_weights=class_weights
     )
 
     print("🚀 Starting training ...\n")

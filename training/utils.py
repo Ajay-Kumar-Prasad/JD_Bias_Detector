@@ -9,35 +9,44 @@ from .dataset import ID2LABEL
 
 
 def compute_metrics(p):
-    """
-    HuggingFace Trainer-compatible metric function.
-    Returns macro precision, recall, F1 + per-class F1.
-    """
     predictions, labels = p
+
+    if predictions.shape != labels.shape:
+        raise ValueError("Predictions and labels shape mismatch")
+
     predictions = np.argmax(predictions, axis=2)
 
     true_labels = [
-        [ID2LABEL[l] for l in label_row if l != -100]
+        [ID2LABEL.get(l, "O") for l in label_row if l != -100]
         for label_row in labels
     ]
+
     true_preds = [
-        [ID2LABEL[pred] for pred, label in zip(pred_row, label_row) if label != -100]
+        [ID2LABEL.get(pred, "O") for pred, lab in zip(pred_row, label_row) if lab != -100]
         for pred_row, label_row in zip(predictions, labels)
     ]
 
-    report = classification_report(true_labels, true_preds, output_dict=True, zero_division=0)
+    if len(true_labels) == 0:
+        raise ValueError("No valid labels found after filtering")
 
-    # Per-class F1 for the four bias categories
+    report = classification_report(
+        true_labels,
+        true_preds,
+        output_dict=True,
+        zero_division=0
+    )
+
     per_class = {}
     for cat in ["GENDER_CODED", "AGEIST", "EXCLUSIONARY", "ABILITY_CODED"]:
-        key = f"B-{cat}"
-        if key in report:
-            per_class[f"f1_{cat.lower()}"] = round(report[key]["f1-score"], 4)
+        if cat in report:
+            per_class[f"f1_{cat.lower()}"] = round(report[cat]["f1-score"], 4)
+        else:
+            per_class[f"f1_{cat.lower()}"] = 0.0
 
     return {
-        "precision": round(precision_score(true_labels, true_preds, zero_division=0), 4),
-        "recall":    round(recall_score(true_labels, true_preds, zero_division=0), 4),
-        "f1":        round(f1_score(true_labels, true_preds, zero_division=0), 4),
+        "precision": round(report["micro avg"]["precision"], 4),
+        "recall":    round(report["micro avg"]["recall"], 4),
+        "f1":        round(report["micro avg"]["f1-score"], 4),
         **per_class,
     }
 

@@ -52,59 +52,106 @@ def tokenize(text: str) -> List[str]:
 
 
 def swap_gender_tokens(tokens: List[str], labels: List[str]) -> Dict:
-    """Swap gendered terms while preserving labels."""
     new_tokens = []
-    for tok in tokens:
+    new_labels = []
+
+    for tok, lbl in zip(tokens, labels):
         lower = tok.lower()
         swapped = GENDER_SWAP.get(lower, tok)
-        # Preserve original capitalisation
-        if tok[0].isupper() and swapped:
+
+        if tok[0].isupper():
             swapped = swapped.capitalize()
+
         new_tokens.append(swapped)
-    return {"tokens": new_tokens, "labels": labels[:], "text": " ".join(new_tokens),
-            "augmentation": "gender_swap"}
+
+        # If word changed meaning → neutralize label
+        if swapped != tok:
+            new_labels.append("O")
+        else:
+            new_labels.append(lbl)
+
+    return {
+        "tokens": new_tokens,
+        "labels": new_labels,
+        "text": " ".join(new_tokens),
+        "augmentation": "gender_swap"
+    }
 
 
 def paraphrase_context(tokens: List[str], labels: List[str]) -> Dict:
-    """Replace neutral context words with synonyms, keep bias spans intact."""
     new_tokens = tokens[:]
-    for i, (tok, lbl) in enumerate(zip(tokens, labels)):
-        if lbl != "O":
-            continue                          # never touch bias spans
-        lower = tok.lower()
+    new_labels = labels[:]
+
+    i = 0
+    while i < len(new_tokens):
+        if new_labels[i] != "O":
+            i += 1
+            continue
+
         for phrase, synonyms in CONTEXT_SYNONYMS.items():
             phrase_toks = phrase.split()
             n = len(phrase_toks)
+
             window = [t.lower() for t in new_tokens[i:i+n]]
+
             if window == phrase_toks:
                 replacement = random.choice(synonyms).split()
+
+                # replace tokens
                 new_tokens[i:i+n] = replacement
-                # Extend / shrink labels accordingly
-                delta = len(replacement) - n
-                labels = labels[:i+n] + ["O"] * max(0, delta) + labels[i+n:]
+
+                # adjust labels safely
+                new_labels[i:i+n] = ["O"] * n
+                if len(replacement) > n:
+                    new_labels[i:i] = ["O"] * (len(replacement) - n)
+                elif len(replacement) < n:
+                    del new_labels[i+len(replacement):i+n]
+
+                i += len(replacement)
                 break
-    return {"tokens": new_tokens, "labels": labels[:], "text": " ".join(new_tokens),
-            "augmentation": "paraphrase"}
+        else:
+            i += 1
+
+    return {
+        "tokens": new_tokens,
+        "labels": new_labels,
+        "text": " ".join(new_tokens),
+        "augmentation": "paraphrase"
+    }
 
 
 def hard_negative(tokens: List[str], labels: List[str]) -> Dict:
-    """
-    Create a hard negative: take a biased sample and wrap the bias term in
-    clearly negating context so the label becomes O.
-    E.g. 'We do NOT require a rockstar' → label 'rockstar' as O.
-    """
-    NEGATIONS = ["We do not require", "This role does not demand",
-                 "You don't need to be", "No need to be"]
+    NEGATIONS = [
+        "We do not require",
+        "This role does not demand",
+        "You don't need to be",
+        "No need to be"
+    ]
+
     new_tokens = tokens[:]
     new_labels = labels[:]
+
     for i, lbl in enumerate(labels):
         if lbl.startswith("B-"):
             negation = random.choice(NEGATIONS).split()
-            new_tokens = negation + new_tokens
-            new_labels = ["O"] * len(negation) + ["O"] * len(labels)  # all neutral
+
+            # insert negation BEFORE bias phrase
+            new_tokens = new_tokens[:i] + negation + new_tokens[i:]
+
+            # shift labels
+            new_labels = (
+                new_labels[:i]
+                + ["O"] * len(negation)
+                + ["O" if l != "O" else "O" for l in new_labels[i:]]
+            )
             break
-    return {"tokens": new_tokens, "labels": new_labels, "text": " ".join(new_tokens),
-            "augmentation": "hard_negative"}
+
+    return {
+        "tokens": new_tokens,
+        "labels": new_labels,
+        "text": " ".join(new_tokens),
+        "augmentation": "hard_negative"
+    }
 
 
 STRATEGIES = [swap_gender_tokens, paraphrase_context, hard_negative]
@@ -122,10 +169,16 @@ def augment_samples(samples: List[Dict], factor: int = 2) -> List[Dict]:
 
         # Only augment samples that have at least one bias label
         if not has_bias:
+            if random.random() < 0.3:
+                try:
+                    new_sample = paraphrase_context(tokens[:], labels[:])
+                    augmented.append(new_sample)
+                except:
+                    pass
             continue
 
-        for _ in range(factor - 1):
-            strategy = random.choice(STRATEGIES)
+        for i in range(factor - 1):
+            strategy = STRATEGIES[i % len(STRATEGIES)]
             try:
                 new_sample = strategy(tokens[:], labels[:])
                 augmented.append(new_sample)
