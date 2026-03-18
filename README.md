@@ -139,7 +139,8 @@ jd-bias-detector/
 │   └── notebooks/
 │       ├── 01_eda.ipynb        # Dataset exploration
 │       ├── 02_baseline.ipynb   # Baseline (rule-based) vs. fine-tuned comparison
-│       └── 03_error_analysis.ipynb
+│       ├── 03_error_analysis.ipynb
+│       └── jd-bias-detector.ipynb  # End-to-end Kaggle/Colab training notebook
 │
 ├── api/
 │   ├── main.py                 # FastAPI app entry point
@@ -285,18 +286,17 @@ curl -X POST http://localhost:8000/analyze \
 ### Data preparation
 
 ```bash
-python training/augment.py \
-  --input data/raw/ \
-  --output data/annotated/ \
-  --lexicon data/bias_lexicon/
+python -m training.data_prep \
+  --output_dir data/annotated \
+  --source both \
+  --n_synthetic 5000
 ```
 
 ### Fine-tune the classifier
 
 ```bash
-python training/train.py \
-  --config training/configs/deberta_base.yaml \
-  --output_dir models/deberta-jd-bias-v1
+python -m training.train \
+  --config training/configs/deberta_base.yaml
 ```
 
 Training logs to Weights & Biases automatically. Set `WANDB_API_KEY` in your environment.
@@ -304,11 +304,22 @@ Training logs to Weights & Biases automatically. Set `WANDB_API_KEY` in your env
 ### Evaluate
 
 ```bash
-python training/evaluate.py \
+python -m training.evaluate \
   --model_dir models/deberta-jd-bias-v1 \
   --test_data data/annotated/test.jsonl \
   --output docs/evaluation_report.md
 ```
+
+### Notebook workflow (`training/notebooks/`)
+
+Use notebooks in this order:
+
+1. `01_eda.ipynb` — inspect label distribution, token lengths, and sample quality
+2. `02_baseline.ipynb` — compare lexicon baseline vs fine-tuned model behavior
+3. `03_error_analysis.ipynb` — inspect false positives/false negatives and confidence trends
+4. `jd-bias-detector.ipynb` — full end-to-end pipeline (Kaggle/Colab style), including:
+   - dataset generation via `python -m training.data_prep --source both --n_synthetic 5000`
+   - model training/evaluation flow
 
 ---
 
