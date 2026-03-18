@@ -7,11 +7,12 @@ Usage (cloud GPU):
 Colab/Kaggle one-liner:
     !python -m training.train --config training/configs/deberta_base.yaml
 """
-import os
 import argparse
 import yaml
 import torch
 from pathlib import Path
+import json
+from collections import Counter
 from transformers import (
     AutoTokenizer,
     AutoModelForTokenClassification,
@@ -22,11 +23,7 @@ from transformers import (
 )
 from .dataset import BiasDataset, LABEL2ID, ID2LABEL, NUM_LABELS
 from .utils import compute_metrics
-from collections import Counter
-import json
-import torch
 from torch.nn import CrossEntropyLoss
-from transformers import Trainer
 
 
 def load_config(path: str) -> dict:
@@ -50,6 +47,52 @@ def compute_class_weights(path, label2id):
         weights[idx] = min(10.0, total / max(1, counts[lbl]))
 
     return weights
+
+
+def _split_stats(path: str) -> dict:
+    total = 0
+    biased = 0
+    with open(path) as f:
+        for line in f:
+            if not line.strip():
+                continue
+            sample = json.loads(line)
+            total += 1
+            if any(lbl != "O" for lbl in sample.get("labels", [])):
+                biased += 1
+    return {"total": total, "biased": biased, "neutral": total - biased}
+
+
+def validate_data_splits(train_path: str, val_path: str, test_path: str):
+    for p in [train_path, val_path]:
+        if not Path(p).exists():
+            raise FileNotFoundError(f"Required split missing: {p}")
+        if Path(p).stat().st_size == 0:
+            raise ValueError(f"Required split is empty: {p}")
+
+    train_stats = _split_stats(train_path)
+    val_stats = _split_stats(val_path)
+
+    if train_stats["total"] == 0:
+        raise ValueError("Train split has zero samples.")
+    if val_stats["total"] == 0:
+        raise ValueError("Val split has zero samples.")
+    if train_stats["biased"] == 0:
+        raise ValueError("Train split has no biased examples.")
+    if train_stats["neutral"] == 0:
+        raise ValueError("Train split has no neutral examples.")
+
+    print(
+        "📊 Split sanity:"
+        f" train={train_stats['total']} (biased={train_stats['biased']}, neutral={train_stats['neutral']})"
+        f" | val={val_stats['total']} (biased={val_stats['biased']}, neutral={val_stats['neutral']})"
+    )
+
+    if Path(test_path).exists() and Path(test_path).stat().st_size > 0:
+        test_stats = _split_stats(test_path)
+        print(
+            f" | test={test_stats['total']} (biased={test_stats['biased']}, neutral={test_stats['neutral']})"
+        )
 
 def build_model_and_tokenizer(cfg: dict):
     print(f"⬇  Loading base model: {cfg['base_model']}")
@@ -108,13 +151,15 @@ class WeightedTrainer(Trainer):
         super().__init__(*args, **kwargs)
         self.class_weights = class_weights
 
-    def compute_loss(self, model, inputs, return_outputs=False):
+    def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
         labels = inputs.pop("labels")
         outputs = model(**inputs)
         logits = outputs.logits
 
+        weights = self.class_weights.to(logits.device)
+
         loss_fct = CrossEntropyLoss(
-            weight=self.class_weights,
+            weight=weights,
             ignore_index=-100
         )
 
@@ -138,10 +183,15 @@ def main(config_path: str):
 
     tokenizer, model = build_model_and_tokenizer(cfg)
 
+    train_path = "data/annotated/train.jsonl"
+    val_path = "data/annotated/val.jsonl"
+    test_path = "data/annotated/test.jsonl"
+    validate_data_splits(train_path, val_path, test_path)
+
     print("📂 Loading datasets ...")
-    train_ds = BiasDataset("data/annotated/train.jsonl", tokenizer,
+    train_ds = BiasDataset(train_path, tokenizer,
                            max_length=cfg.get("max_length", 256))
-    val_ds   = BiasDataset("data/annotated/val.jsonl",   tokenizer,
+    val_ds   = BiasDataset(val_path,   tokenizer,
                            max_length=cfg.get("max_length", 256))
 
     print(f"   Train: {len(train_ds)} samples")
@@ -160,9 +210,9 @@ def main(config_path: str):
         )
 
     class_weights = compute_class_weights(
-        "data/annotated/train.jsonl",
+        train_path,
         LABEL2ID
-    ).to(model.device)
+    )
 
     trainer = WeightedTrainer(
         model=model,
@@ -184,8 +234,7 @@ def main(config_path: str):
     tokenizer.save_pretrained(cfg["output_dir"])
 
     # ── Final eval on test set ─────────────────────────────
-    test_path = "data/annotated/test.jsonl"
-    if Path(test_path).exists():
+    if Path(test_path).exists() and Path(test_path).stat().st_size > 0:
         print("\n📊 Evaluating on test set ...")
         test_ds = BiasDataset(test_path, tokenizer,
                               max_length=cfg.get("max_length", 256))

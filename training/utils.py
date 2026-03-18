@@ -2,32 +2,53 @@
 utils.py — Metrics, logging helpers, and seqeval wrappers
 """
 import numpy as np
-from seqeval.metrics import (
-    f1_score, precision_score, recall_score, classification_report
-)
+from seqeval.metrics import classification_report
 from .dataset import ID2LABEL
 
 
 def compute_metrics(p):
-    predictions, labels = p
+    # Handle HF EvalPrediction object
+    if hasattr(p, "predictions"):
+        predictions = p.predictions
+        labels = p.label_ids
+    else:
+        predictions, labels = p
 
-    if predictions.shape != labels.shape:
-        raise ValueError("Predictions and labels shape mismatch")
+    # Some HF models return a tuple; first element is token logits.
+    if isinstance(predictions, tuple):
+        predictions = predictions[0]
 
-    predictions = np.argmax(predictions, axis=2)
+    # Convert logits → class ids
+    preds = np.argmax(predictions, axis=2)
 
-    true_labels = [
-        [ID2LABEL.get(l, "O") for l in label_row if l != -100]
-        for label_row in labels
-    ]
+    true_labels = []
+    true_preds = []
 
-    true_preds = [
-        [ID2LABEL.get(pred, "O") for pred, lab in zip(pred_row, label_row) if lab != -100]
-        for pred_row, label_row in zip(predictions, labels)
-    ]
+    for pred_row, label_row in zip(preds, labels):
+        cur_preds = []
+        cur_labels = []
 
-    if len(true_labels) == 0:
-        raise ValueError("No valid labels found after filtering")
+        for pred, lab in zip(pred_row, label_row):
+            if lab == -100:
+                continue
+            cur_preds.append(ID2LABEL.get(pred, "O"))
+            cur_labels.append(ID2LABEL.get(lab, "O"))
+
+        if cur_labels:
+            true_preds.append(cur_preds)
+            true_labels.append(cur_labels)
+
+    if not true_labels:
+        # Keep training/eval loop alive instead of crashing.
+        return {
+            "precision": 0.0,
+            "recall": 0.0,
+            "f1": 0.0,
+            "f1_gender_coded": 0.0,
+            "f1_ageist": 0.0,
+            "f1_exclusionary": 0.0,
+            "f1_ability_coded": 0.0,
+        }
 
     report = classification_report(
         true_labels,
@@ -35,19 +56,22 @@ def compute_metrics(p):
         output_dict=True,
         zero_division=0
     )
+    micro = report.get("micro avg", {"precision": 0.0, "recall": 0.0, "f1-score": 0.0})
 
-    per_class = {}
-    for cat in ["GENDER_CODED", "AGEIST", "EXCLUSIONARY", "ABILITY_CODED"]:
-        if cat in report:
-            per_class[f"f1_{cat.lower()}"] = round(report[cat]["f1-score"], 4)
-        else:
-            per_class[f"f1_{cat.lower()}"] = 0.0
+    # Extract entity-level F1 correctly (without B-/I- confusion)
+    def get_entity_f1(entity):
+        # seqeval groups B-/I- automatically under entity
+        return round(report.get(entity, {}).get("f1-score", 0.0), 4)
 
     return {
-        "precision": round(report["micro avg"]["precision"], 4),
-        "recall":    round(report["micro avg"]["recall"], 4),
-        "f1":        round(report["micro avg"]["f1-score"], 4),
-        **per_class,
+        "precision": round(micro["precision"], 4),
+        "recall":    round(micro["recall"], 4),
+        "f1":        round(micro["f1-score"], 4),
+
+        "f1_gender_coded": get_entity_f1("GENDER_CODED"),
+        "f1_ageist": get_entity_f1("AGEIST"),
+        "f1_exclusionary": get_entity_f1("EXCLUSIONARY"),
+        "f1_ability_coded": get_entity_f1("ABILITY_CODED"),
     }
 
 

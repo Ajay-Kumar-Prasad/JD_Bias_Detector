@@ -1,307 +1,271 @@
 """
-data_prep.py — Build training data for JD Bias Detector
+data_prep.py — Build training data for JD Bias Detector.
 
-HuggingFace sources (tried in order, first success wins):
-  1. lukebarousse/data_nerd_jobs          — real tech JDs, public
-  2. elricwan/job-description             — general JDs, public
-  3. Mxode/job-description-ner           — pre-labeled NER dataset
-  4. jovialjoy/job-postings-2023         — scraped postings
-  Fallback: rich synthetic generation (runs offline, no HF needed)
-
-Usage:
-    python -m training.data_prep --output_dir data/annotated --n_synthetic 1000
-    python -m training.data_prep --source synthetic   # offline mode
-    python -m training.data_prep --source hf          # HF only
+Key goals:
+1. Less synthetic leakage (avoid exact phrase -> exact label memorization).
+2. More natural synthetic writing and lower bias density.
+3. Biased/neutral balance near 50/50.
+4. Optional real-JD ingestion.
 """
 
-import json
-import re
-import random
 import argparse
+import csv
+import json
+import random
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
-from typing import List, Dict, Tuple
+from typing import Dict, List, Optional
 
-# ─── Bias Lexicon ─────────────────────────────────────────────────────────────
+import numpy as np
 
-BIAS_LEXICON = {
-    "GENDER_CODED": [
-        "aggressive", "assertive", "dominant", "competitive",
-        "fearless", "ambitious", "driven", "results-driven",
-        "self-starter", "go-getter", "high achiever",
-        "decisive", "bold", "tenacious",
+BIAS_LEXICON: Dict[str, List[str]] = {}
 
-        # 🔥 phrase-level
-        "crush it", "kill it", "dominate", "take ownership",
-    ],
-
-    "AGEIST": [
-        "young", "youthful", "young and hungry", "young and energetic",
-        "recent graduate", "new graduate", "fresh graduate",
-        "digital native", "tech-savvy millennial",
-        "young professional", "up and coming",
-        "early career", "fresh out of school", "just graduated",
-        "young talent", "next generation", "millennial mindset",
-        "recent grad welcome", "no experience necessary",
-        "entry level mindset", "fresh perspective", "new to industry ok",
-    ],
-
-    "EXCLUSIONARY": [
-        "rockstar", "rock star", "rockstar engineer",
-        "ninja", "ninja-level", "ninja-level skills",
-        "wizard", "guru", "superstar",
-        "hustler", "10x engineer", "unicorn",
-
-        "culture fit", "culture match", "culture add",
-        "culture first", "fits our culture",
-        "startup dna", "we work hard we play hard",
-    ],
-
-    "ABILITY_CODED": [
-        "fast-paced", "fast-paced environment",
-        "high pressure", "high pressure environment",
-        "must handle pressure", "must thrive under pressure",
-        "high stress", "high stress environment",
-
-        # 🔥 CRITICAL missing ones
-        "demanding environment",
-        "demanding workload",
-        "intense challenges",
-
-        "always on", "24/7 availability",
-        "no work-life balance",
-        "on call", "on call at all times",
-        "available nights and weekends",
-
-        "relentless pace",
-        "sink or swim", "trial by fire", "baptism by fire",
-
-        "thick skin required",
-        "handle ambiguity", "thrive in chaos",
-
-        "wear many hats",
-        "roll up your sleeves",
-        "no hand-holding",
-        "hit the ground running",
-    ]
+NEGATION_CUES = {
+    "no",
+    "not",
+    "without",
+    "never",
+    "avoid",
+    "avoids",
+    "dont",
+    "don't",
+    "doesnt",
+    "doesn't",
+    "isnt",
+    "isn't",
 }
-# ─── Lexicon Validation (NEW) ────────────────────────────────────────────────
 
-def validate_lexicon(lexicon):
+# Safety valve for known noisy labels if they appear in lexicon files.
+NOISY_TERMS = {
+    "AGEIST": {"high energy"},
+}
+
+ROLES = [
+    "Software Engineer",
+    "Data Scientist",
+    "Product Manager",
+    "DevOps Engineer",
+    "Backend Engineer",
+    "Frontend Engineer",
+    "ML Engineer",
+    "Technical Writer",
+    "Customer Success Manager",
+]
+
+COMPANY_TYPES = [
+    "a product-focused team",
+    "a growing SaaS company",
+    "a remote-first organization",
+    "an engineering-led startup",
+]
+
+NEUTRAL_INTRO = [
+    "We are hiring a {role} to join {company}.",
+    "Our team is looking for a {role}.",
+    "We are seeking a {role} who values collaboration and quality.",
+]
+
+NEUTRAL_RESP = [
+    "You will collaborate with cross-functional partners to deliver customer value.",
+    "You will design, build, and maintain reliable systems.",
+    "You will communicate clearly with stakeholders and teammates.",
+    "You will participate in planning, code reviews, and incident response.",
+]
+
+NEUTRAL_REQ = [
+    "Experience with modern development workflows is preferred.",
+    "Strong written and verbal communication skills are important.",
+    "You can break down ambiguous problems into clear execution steps.",
+    "You care about maintainability, testing, and documentation.",
+]
+
+BIAS_SENTENCE = [
+    "We are looking for someone who can {bias}.",
+    "The ideal candidate is {bias}.",
+    "This role requires a {bias} mindset.",
+    "You should be comfortable in a {bias} environment.",
+]
+
+HARD_NEGATIVE_NEUTRAL = [
+    "We value a dynamic and inclusive work culture.",
+    "Our diverse team collaborates effectively across functions.",
+    "We foster a collaborative, supportive, and transparent environment.",
+    "Candidates should communicate clearly and work well with others.",
+    "We welcome applicants from different backgrounds and experiences.",
+    "The team is dynamic, thoughtful, and focused on learning.",
+]
+
+
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+
+
+def load_lexicons(path: str = "data/bias_lexicon") -> Dict[str, List[str]]:
+    lexicon: Dict[str, List[str]] = {}
+    for file in sorted(Path(path).glob("*.json")):
+        with open(file) as f:
+            data = json.load(f)
+        category = data["category"]
+        terms = [t.strip().lower() for t in data["terms"] if t.strip()]
+        terms = [t for t in terms if t not in NOISY_TERMS.get(category, set())]
+        lexicon[category] = sorted(set(terms))
+    return lexicon
+
+
+def validate_lexicon(lexicon: Dict[str, List[str]]):
     seen = {}
     for cat, terms in lexicon.items():
         for term in terms:
-            key = term.lower()
-            if key in seen:
+            if term in seen:
                 raise ValueError(
-                    f"Lexicon overlap detected: '{term}' in {seen[key]} and {cat}"
+                    f"Lexicon overlap detected: '{term}' in {seen[term]} and {cat}"
                 )
-            seen[key] = cat
+            seen[term] = cat
 
-validate_lexicon(BIAS_LEXICON)
-
-# ─── IOB Annotation ───────────────────────────────────────────────────────────
 
 def tokenize_simple(text: str) -> List[str]:
     return re.findall(r"\w[\w'-]*|[^\w\s]", text)
 
 
-def clean_token(t):
-    return re.sub(r"[^\w\-]", "", t.lower())
+def clean_token(token: str) -> str:
+    return re.sub(r"[^\w\-]", "", token.lower())
+
+
+def _phrase_tokens(phrase: str) -> List[str]:
+    return [t for t in (clean_token(x) for x in tokenize_simple(phrase)) if t]
+
+
+def _is_negated(tokens: List[str], start: int, length: int) -> bool:
+    left = [clean_token(t) for t in tokens[max(0, start - 4) : start]]
+    right = [clean_token(t) for t in tokens[start : start + length + 6]]
+
+    if any(tok in NEGATION_CUES for tok in left):
+        return True
+    if "not" in right and ("required" in right or "necessary" in right):
+        return True
+    return False
+
 
 def annotate_iob(tokens: List[str], lexicon: Dict[str, List[str]]) -> List[str]:
     labels = ["O"] * len(tokens)
+    idx_map = [i for i, tok in enumerate(tokens) if clean_token(tok)]
+    cleaned = [clean_token(tokens[i]) for i in idx_map]
 
     for category, phrases in lexicon.items():
-        for phrase in sorted(phrases, key=len, reverse=True):
-            phrase_tokens = phrase.lower().split()
-            n = len(phrase_tokens)
-
-            for i in range(len(tokens) - n + 1):
-                window = [clean_token(t) for t in tokens[i:i+n]]
-
-                if window == phrase_tokens:
-                    if all(labels[i+j] == "O" for j in range(n)):
-                        labels[i] = f"B-{category}"
-                        for j in range(1, n):
-                            labels[i+j] = f"I-{category}"
-
+        parsed = sorted(
+            [p for p in (_phrase_tokens(x) for x in phrases) if p],
+            key=len,
+            reverse=True,
+        )
+        for ptoks in parsed:
+            n = len(ptoks)
+            for i in range(len(cleaned) - n + 1):
+                if cleaned[i : i + n] != ptoks:
+                    continue
+                span_positions = idx_map[i : i + n]
+                start_pos = span_positions[0]
+                if _is_negated(tokens, start_pos, n):
+                    # Keep contextual negatives neutral to reduce deterministic leakage.
+                    continue
+                if all(labels[pos] == "O" for pos in span_positions):
+                    labels[start_pos] = f"B-{category}"
+                    for j in range(1, n):
+                        labels[span_positions[j]] = f"I-{category}"
     return labels
 
-# ─── Rich Synthetic Generator ─────────────────────────────────────────────────
 
-ROLES = [
-    "Software Engineer", "Senior Software Engineer", "Product Manager",
-    "Data Scientist", "Marketing Manager", "Sales Representative",
-    "UX Designer", "DevOps Engineer", "Business Analyst",
-    "Frontend Developer", "Backend Engineer", "ML Engineer",
-    "Full Stack Developer", "Data Engineer", "Cloud Architect",
-    "Security Engineer", "QA Engineer", "Technical Lead",
-    "Engineering Manager", "Product Designer", "Growth Manager",
-    "Customer Success Manager", "Operations Manager", "HR Manager",
-]
+def _pick_bias_phrase(
+    phrase_counts: Counter,
+    category_counts: Dict[str, int],
+    max_phrase_repeat: int,
+    max_per_category: int,
+    multi_token_boost: float = 2.0,
+    category: Optional[str] = None,
+) -> tuple[str, str]:
+    categories = [category] if category else list(BIAS_LEXICON.keys())
+    random.shuffle(categories)
 
-COMPANIES = [
-    "our team", "our startup", "our engineering team",
-    "our growing company", "our product team", "our fast-growing team",
-]
+    for cat in categories:
+        if category_counts[cat] >= max_per_category:
+            continue
+        pool = [p for p in BIAS_LEXICON[cat] if phrase_counts[p] < max_phrase_repeat]
+        if pool:
+            weights = [1.0 + (multi_token_boost if len(p.split()) > 1 else 0.0) for p in pool]
+            phrase = random.choices(pool, weights=weights, k=1)[0]
+            phrase_counts[phrase] += 1
+            category_counts[cat] += 1
+            return cat, phrase
 
-NEUTRAL_OPENERS = [
-    "We are seeking a {role} to join {company}.",
-    "We are looking for an experienced {role}.",
-    "{company} is hiring a {role}.",
-    "Join {company} as a {role}.",
-    "We have an exciting opportunity for a {role}.",
-    "We are expanding and looking for a skilled {role}.",
-]
-
-BIASED_OPENERS = [
-    "We are looking for a {bias1} {role} who is {bias2} and ready to {bias3}.",
-    "Join {company} as a {role}. You must be {bias1} and {bias2}.",
-    "We need a {bias1} {role} to {bias3} in our {bias2} environment.",
-    "As a {role}, you will {bias3}. The ideal candidate is {bias1} and {bias2}.",
-    "We are hiring a {bias1}, {bias2} {role} who can {bias3}.",
-    "Looking for a {role} who is {bias1} with a {bias2} attitude.",
-]
-
-NEUTRAL_REQUIREMENTS = [
-    "You will collaborate effectively with cross-functional teams.",
-    "You will deliver high-quality work on time.",
-    "You will communicate clearly with stakeholders.",
-    "Strong problem-solving skills are required.",
-    "You will contribute to team goals and shared objectives.",
-    "Experience with modern development practices is preferred.",
-    "You will take ownership of your deliverables.",
-    "A growth mindset and willingness to learn are valued.",
-    "You will work in a collaborative, inclusive environment.",
-    "We offer competitive compensation and flexible working arrangements.",
-    "You will mentor junior team members.",
-    "Strong written and verbal communication skills required.",
-    "Experience working in cross-functional teams preferred.",
-    "You will participate in code reviews and technical discussions.",
-]
-
-BIASED_REQUIREMENTS = [
-    "You must {bias} to succeed in this role.",
-    "The ideal candidate is {bias} and ready to hit the ground running.",
-    "We are looking for someone who is {bias} and can thrive in our culture.",
-    "You should be {bias} with a proven track record.",
-    "Candidates must be {bias} and comfortable in a {bias2} environment.",
-    "We expect our team members to be {bias}.",
-]
-BIASED_PHRASES = [
-    "young and hungry",
-    "fast-paced environment",
-    "demanding environment",
-    "intense challenges",
-    "rockstar engineer",
-    "ninja-level skills",
-    "hit the ground running",
-    "crush it",
-    "work hard play hard",
-]
-NEUTRAL_HARD = [
-    "collaborative team player",
-    "strong communication skills",
-    "supports colleagues effectively",
-    "works well with others",
-    "team-oriented environment",
-    "effective cross-functional collaboration",   # ✅ NEW
-]
+    fallback_cats = [c for c in BIAS_LEXICON.keys() if category_counts[c] < max_per_category]
+    if not fallback_cats:
+        fallback_cats = list(BIAS_LEXICON.keys())
+    cat = category if category and category in BIAS_LEXICON else random.choice(fallback_cats)
+    phrase = random.choice(BIAS_LEXICON[cat])
+    phrase_counts[phrase] += 1
+    category_counts[cat] += 1
+    return cat, phrase
 
 
-def pick_bias(category: str = None) -> str:
-    if category:
-        return random.choice(BIAS_LEXICON[category])
-    cat = random.choice(list(BIAS_LEXICON.keys()))
-    return random.choice(BIAS_LEXICON[cat])
+def generate_synthetic_jd(
+    biased: bool,
+    phrase_counts: Counter,
+    category_counts: Dict[str, int],
+    max_phrase_repeat: int = 60,
+    max_per_category: int = 2000,
+    multi_token_boost: float = 2.0,
+) -> str:
+    role = random.choice(ROLES)
+    company = random.choice(COMPANY_TYPES)
 
+    lines = [random.choice(NEUTRAL_INTRO).format(role=role, company=company)]
+    lines.extend(random.sample(NEUTRAL_RESP, k=2))
+    lines.extend(random.sample(NEUTRAL_REQ, k=2))
 
-def generate_synthetic_jd(biased: bool = True) -> str:
-    role    = random.choice(ROLES)
-    company = random.choice(COMPANIES)
-
-    parts = []
-
-    # ─── 🔥 STRONG PHRASE SIGNAL (ALWAYS for biased) ───
     if biased:
-        phrase = random.choice(BIASED_PHRASES)
-        parts.append(f"We are looking for someone who thrives in a {phrase}.")
-
-        # Add second bias phrase sometimes (multi-pattern learning)
-        if random.random() < 0.5:
-            phrase2 = random.choice(BIASED_PHRASES)
-            parts.append(f"You will thrive in a {phrase2}.")
-
-        # 🔁 reinforce phrase (important for learning)
-        if random.random() < 0.3:
-            parts.append(f"The role involves working in a {phrase}.")
-
-    # ─── STRUCTURED JD FORMAT ───
-    if biased:
-        opener = random.choice(BIASED_OPENERS).format(
-            role=role,
-            company=company,
-            bias1=pick_bias(),
-            bias2=pick_bias(),
-            bias3=pick_bias(),
-        )
-        parts.append(opener)
-        parts.append("About the role:")
-
-        # Section: Responsibilities
-        parts.append("Responsibilities:")
-        for _ in range(random.randint(1, 2)):
-            parts.append(random.choice(NEUTRAL_REQUIREMENTS))
-
-        # Section: Requirements
-        parts.append("Requirements:")
-
-        n_bias_lines = random.choice([3, 4])
-        for _ in range(n_bias_lines):
-            req = random.choice(BIASED_REQUIREMENTS).format(
-                bias=pick_bias(),
-                bias2=pick_bias()
+        # Lower bias density to prevent synthetic overfitting.
+        bias_budget = random.choice([1, 1, 2])
+        for _ in range(bias_budget):
+            _, phrase = _pick_bias_phrase(
+                phrase_counts=phrase_counts,
+                category_counts=category_counts,
+                max_phrase_repeat=max_phrase_repeat,
+                max_per_category=max_per_category,
+                multi_token_boost=multi_token_boost,
             )
-            parts.append(req)
+            lines.append(random.choice(BIAS_SENTENCE).format(bias=phrase))
 
-    else:
-        opener = random.choice(NEUTRAL_OPENERS).format(
-            role=role,
-            company=company
-        )
-        parts.append(opener)
+        # Add occasional neutral/negated contextual usage of bias phrases.
+        if random.random() < 0.35:
+            _, phrase = _pick_bias_phrase(
+                phrase_counts=phrase_counts,
+                category_counts=category_counts,
+                max_phrase_repeat=max_phrase_repeat,
+                max_per_category=max_per_category,
+                multi_token_boost=multi_token_boost,
+            )
+            lines.append(
+                f"Using {phrase} language is not required for success in this role."
+            )
 
-        # Mix both types properly
-        for _ in range(2):
-            parts.append(random.choice(NEUTRAL_REQUIREMENTS))
+    if random.random() < 0.4:
+        lines.append("We are an equal opportunity employer.")
 
-        for _ in range(2):
-            parts.append(random.choice(NEUTRAL_HARD))
-
-    return " ".join(parts)
+    return " ".join(lines)
 
 
-# ─── HuggingFace Loader ───────────────────────────────────────────────────────
-
-# HF_CANDIDATES = [
-#     # (dataset_name, text_column)
-#     ("lukebarousse/data_nerd_jobs",     "job_description"),
-#     ("elricwan/job-description",        "description"),
-#     ("Mxode/job-description-ner",       "text"),
-#     ("jovialjoy/job-postings-2023",     "description"),
-#     ("jacob-hugging-face/job-descriptions", "job_description"),
-# ]
 HF_CANDIDATES = [
     ("DBD-research-group/job-descriptions-500k", "description"),
-    ("swimming/job_descriptions",                "job_description"),
-    ("vikp/job_postings",                        "text"),
-    ("jacob-hugging-face/job-descriptions",      "job_description"),
-    ("elricwan/job-description",                 "description"),
+    ("swimming/job_descriptions", "job_description"),
+    ("vikp/job_postings", "text"),
+    ("jacob-hugging-face/job-descriptions", "job_description"),
+    ("elricwan/job-description", "description"),
 ]
 
 
 def load_hf_dataset(max_samples: int) -> List[Dict]:
-    samples = []
+    samples: List[Dict] = []
     try:
         from datasets import load_dataset
     except ImportError:
@@ -312,32 +276,81 @@ def load_hf_dataset(max_samples: int) -> List[Dict]:
         try:
             print(f"   Trying {dataset_name} ...")
             ds = load_dataset(dataset_name, split="train")
+            added = 0
             for row in ds:
                 text = row.get(text_col) or ""
-                if not isinstance(text, str) or len(text.split()) < 15:
+                if not isinstance(text, str) or len(text.split()) < 20:
                     continue
-                text = text[:800].strip()
+                text = text[:900].strip()
                 tokens = tokenize_simple(text)
                 labels = annotate_iob(tokens, BIAS_LEXICON)
-                samples.append({
-                    "tokens": tokens,
-                    "labels": labels,
-                    "text":   text,
-                    "source": dataset_name,
-                })
+                samples.append(
+                    {
+                        "tokens": tokens,
+                        "labels": labels,
+                        "text": text,
+                        "source": dataset_name,
+                    }
+                )
+                added += 1
                 if len(samples) >= max_samples:
                     break
-            print(f"   Loaded {len(samples)} samples from {dataset_name}.")
-            return samples
+            print(f"   Added {added} samples from {dataset_name}")
         except Exception as e:
             print(f"   {dataset_name} failed: {str(e)[:80]}")
             continue
+        if len(samples) >= max_samples:
+            break
 
-    print("   All HuggingFace sources failed. Falling back to synthetic.")
     return samples
 
 
-# ─── Dataset Builder ──────────────────────────────────────────────────────────
+def load_real_jds(path: str, max_samples: int = 500) -> List[str]:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"Real data file not found: {path}")
+
+    texts: List[str] = []
+    suffix = p.suffix.lower()
+
+    if suffix == ".txt":
+        texts = [
+            line.strip()
+            for line in p.read_text().splitlines()
+            if len(line.split()) >= 20
+        ]
+    elif suffix == ".jsonl":
+        with open(p) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                text = (
+                    row.get("text")
+                    or row.get("description")
+                    or row.get("job_description")
+                    or ""
+                )
+                if isinstance(text, str) and len(text.split()) >= 20:
+                    texts.append(text.strip())
+    elif suffix == ".csv":
+        with open(p) as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                text = (
+                    row.get("text")
+                    or row.get("description")
+                    or row.get("job_description")
+                    or ""
+                )
+                if isinstance(text, str) and len(text.split()) >= 20:
+                    texts.append(text.strip())
+    else:
+        raise ValueError("Supported real-data formats: .txt, .jsonl, .csv")
+
+    random.shuffle(texts)
+    return texts[:max_samples]
+
 
 def build_sample(text: str, source: str = "synthetic") -> Dict:
     tokens = tokenize_simple(text)
@@ -345,92 +358,291 @@ def build_sample(text: str, source: str = "synthetic") -> Dict:
     return {"tokens": tokens, "labels": labels, "text": text, "source": source}
 
 
-def generate_synthetic(n: int) -> List[Dict]:
-    samples = []
-    # n_biased  = int(n * 0.65)
-    # NEW — 50/50 split, less synthetic dominance
-    n_biased  = int(n * 0.50)
+def _dominant_category(sample: Dict) -> Optional[str]:
+    c = Counter()
+    for lbl in sample.get("labels", []):
+        if lbl.startswith("B-"):
+            c[lbl.split("-", 1)[1]] += 1
+    if not c:
+        return None
+    return c.most_common(1)[0][0]
+
+
+def rebalance_biased_categories(samples: List[Dict], max_per_category: int) -> List[Dict]:
+    if max_per_category <= 0:
+        return samples
+
+    biased = [s for s in samples if any(l != "O" for l in s["labels"])]
+    neutral = [s for s in samples if all(l == "O" for l in s["labels"])]
+
+    buckets: Dict[str, List[Dict]] = defaultdict(list)
+    for s in biased:
+        cat = _dominant_category(s)
+        if cat is not None:
+            buckets[cat].append(s)
+
+    kept_biased: List[Dict] = []
+    for cat, bucket in buckets.items():
+        if len(bucket) > max_per_category:
+            kept_biased.extend(random.sample(bucket, max_per_category))
+        else:
+            kept_biased.extend(bucket)
+
+    # Keep any biased samples without dominant category as-is.
+    leftover = [s for s in biased if _dominant_category(s) is None]
+    result = kept_biased + leftover + neutral
+    random.shuffle(result)
+    return result
+
+
+def generate_hard_negative_neutral(n: int) -> List[Dict]:
+    out: List[Dict] = []
+    for _ in range(n):
+        role = random.choice(ROLES)
+        company = random.choice(COMPANY_TYPES)
+        intro = random.choice(NEUTRAL_INTRO).format(role=role, company=company)
+        line1 = random.choice(HARD_NEGATIVE_NEUTRAL)
+        line2 = random.choice(NEUTRAL_RESP)
+        line3 = random.choice(NEUTRAL_REQ)
+        text = " ".join([intro, line1, line2, line3])
+        out.append(build_sample(text, source="synthetic_hard_negative"))
+    return out
+
+
+def generate_synthetic(
+    n: int,
+    synthetic_biased_ratio: float = 0.30,
+    max_per_category: int = 2000,
+    multi_token_boost: float = 2.0,
+) -> List[Dict]:
+    phrase_counts: Counter = Counter()
+    category_counts = defaultdict(int)
+    n_biased = int(n * synthetic_biased_ratio)
     n_neutral = n - n_biased
+    samples: List[Dict] = []
+
     for _ in range(n_biased):
-        samples.append(build_sample(generate_synthetic_jd(biased=True),  "synthetic_biased"))
+        samples.append(
+            build_sample(
+                generate_synthetic_jd(
+                    True,
+                    phrase_counts,
+                    category_counts,
+                    max_per_category=max_per_category,
+                    multi_token_boost=multi_token_boost,
+                ),
+                "synthetic_biased",
+            )
+        )
     for _ in range(n_neutral):
-        samples.append(build_sample(generate_synthetic_jd(biased=False), "synthetic_neutral"))
+        samples.append(
+            build_sample(
+                generate_synthetic_jd(
+                    False,
+                    phrase_counts,
+                    category_counts,
+                    max_per_category=max_per_category,
+                    multi_token_boost=multi_token_boost,
+                ),
+                "synthetic_neutral",
+            )
+        )
+
     random.shuffle(samples)
     return samples
 
 
-def split_and_save(samples: List[Dict], output_dir: Path,
-                   train_ratio=0.8, val_ratio=0.1):
-    random.shuffle(samples)
-    n = len(samples)
-    t = int(n * train_ratio)
-    v = int(n * val_ratio)
+def rebalance_samples(samples: List[Dict], target_ratio: float = 0.5) -> List[Dict]:
+    biased = [s for s in samples if any(l != "O" for l in s["labels"])]
+    neutral = [s for s in samples if all(l == "O" for l in s["labels"])]
 
-    splits = {
-        "train": samples[:t],
-        "val":   samples[t:t+v],
-        "test":  samples[t+v:],
+    if not biased or not neutral:
+        return samples
+
+    # Force exact 50/50 balance when target_ratio is 0.5 (most stable mode).
+    if abs(target_ratio - 0.5) < 1e-9:
+        if len(neutral) < len(biased):
+            needed = len(biased) - len(neutral)
+            neutral.extend(generate_hard_negative_neutral(needed))
+        elif len(neutral) > len(biased):
+            neutral = random.sample(neutral, len(biased))
+        result = biased + neutral
+        random.shuffle(result)
+        return result
+
+    max_biased = int(len(neutral) * (target_ratio / (1 - target_ratio)))
+    if len(biased) > max_biased:
+        biased = random.sample(biased, max_biased)
+
+    result = biased + neutral
+    random.shuffle(result)
+    return result
+
+
+def count_bias(samples: List[Dict]) -> dict:
+    biased = sum(1 for s in samples if any(l != "O" for l in s["labels"]))
+    neutral = len(samples) - biased
+    return {
+        "total": len(samples),
+        "biased": biased,
+        "neutral": neutral,
+        "ratio": round((biased / len(samples)) if samples else 0.0, 4),
     }
 
+
+def split_samples(
+    samples: List[Dict],
+    train_ratio: float = 0.8,
+    val_ratio: float = 0.1,
+) -> Dict[str, List[Dict]]:
+    pool = samples[:]
+    random.shuffle(pool)
+    n = len(pool)
+    t = int(n * train_ratio)
+    v = int(n * val_ratio)
+    return {
+        "train": pool[:t],
+        "val": pool[t : t + v],
+        "test": pool[t + v :],
+    }
+
+
+def save_splits(splits: Dict[str, List[Dict]], output_dir: Path):
     output_dir.mkdir(parents=True, exist_ok=True)
-    for name, data in splits.items():
+    for name in ["train", "val", "test"]:
+        data = splits[name]
         path = output_dir / f"{name}.jsonl"
         with open(path, "w") as f:
             for s in data:
                 f.write(json.dumps(s) + "\n")
         has_bias = sum(1 for s in data if any(l != "O" for l in s["labels"]))
-        print(f"   ✅ {name}.jsonl — {len(data)} samples "
-              f"({has_bias} biased, {len(data)-has_bias} neutral) → {path}")
+        print(
+            f"   ✅ {name}.jsonl — {len(data)} samples "
+            f"({has_bias} biased, {len(data) - has_bias} neutral) → {path}"
+        )
 
-    # Save lexicon snapshots
     lexicon_dir = output_dir.parent / "bias_lexicon"
     lexicon_dir.mkdir(exist_ok=True)
     for cat, terms in BIAS_LEXICON.items():
-        p = lexicon_dir / f"{cat.lower()}.json"
-        if not p.exists():
-            with open(p, "w") as f:
-                json.dump({"category": cat, "terms": terms}, f, indent=2)
+        with open(lexicon_dir / f"{cat.lower()}.json", "w") as f:
+            json.dump({"category": cat, "terms": terms}, f, indent=2)
     print(f"   ✅ Bias lexicons saved to {lexicon_dir}")
 
 
-# ─── CLI ─────────────────────────────────────────────────────────────────────
+def verify_saved_splits(output_dir: Path):
+    print("\n🔎 VERIFY SAVED FILES")
+    for name in ["train", "val", "test"]:
+        path = output_dir / f"{name}.jsonl"
+        data: List[Dict] = []
+        with open(path) as f:
+            for line in f:
+                if line.strip():
+                    data.append(json.loads(line))
+        stats = count_bias(data)
+        print(f"{name}: {stats}")
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output_dir",  default="data/annotated")
-    parser.add_argument("--n_synthetic", type=int, default=1000,
-                        help="Synthetic samples to generate (used as fallback or addition)")
-    parser.add_argument("--source", choices=["hf", "synthetic", "both"],
-                        default="both",
-                        help="'hf' = HuggingFace only | 'synthetic' = offline | 'both' = HF + synthetic")
-    args = parser.parse_args()
 
-    output_dir = Path(args.output_dir)
-    samples    = []
-
-    if args.source in ("hf", "both"):
-        print("⬇  Trying HuggingFace datasets ...")
-        hf_samples = load_hf_dataset(max_samples=3500)
-        samples.extend(hf_samples)
-
-    if args.source in ("synthetic", "both") or len(samples) < 300:
-        needed = max(args.n_synthetic, 300 - len(samples))
-        print(f"⚙  Generating {needed} synthetic samples ...")
-        samples.extend(generate_synthetic(needed))
+def print_distributions(samples: List[Dict]):
+    label_counts = Counter(l for s in samples for l in s["labels"])
+    biased = sum(1 for s in samples if any(l != "O" for l in s["labels"]))
+    neutral = len(samples) - biased
+    category_counts = Counter()
+    for lbl, count in label_counts.items():
+        if lbl.startswith("B-"):
+            category_counts[lbl.split("-", 1)[1]] += count
 
     print(f"\n📦 Total samples: {len(samples)}")
-
-    # Print label distribution
-    from collections import Counter
-    label_counts = Counter(
-    l for s in samples for l in s["labels"]
-)
-
+    print(
+        f"   Split mix: biased={biased} neutral={neutral} "
+        f"ratio={biased / max(1, len(samples)):.2f}"
+    )
     print("   Label distribution (including O):")
     for lbl, count in sorted(label_counts.items()):
         print(f"      {lbl}: {count}")
+    if category_counts:
+        print("   B-tag category distribution:")
+        for cat, count in sorted(category_counts.items()):
+            print(f"      {cat}: {count}")
 
-    split_and_save(samples, output_dir)
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--output_dir", default="data/annotated")
+    parser.add_argument("--n_synthetic", type=int, default=1200)
+    parser.add_argument("--source", choices=["hf", "synthetic", "both"], default="both")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--real_data_path",
+        default=None,
+        help="Optional .txt/.jsonl/.csv file with real JDs",
+    )
+    parser.add_argument("--real_max_samples", type=int, default=300)
+    parser.add_argument("--target_ratio", type=float, default=0.5)
+    parser.add_argument("--synthetic_biased_ratio", type=float, default=0.30)
+    parser.add_argument("--max_per_category", type=int, default=2000)
+    parser.add_argument("--biased_category_cap", type=int, default=0)
+    parser.add_argument("--multi_token_boost", type=float, default=2.0)
+    args = parser.parse_args()
+
+    set_seed(args.seed)
+
+    global BIAS_LEXICON
+    BIAS_LEXICON = load_lexicons()
+    validate_lexicon(BIAS_LEXICON)
+
+    output_dir = Path(args.output_dir)
+    samples: List[Dict] = []
+
+    if args.source in ("hf", "both"):
+        print("⬇  Loading HuggingFace job description data ...")
+        samples.extend(load_hf_dataset(max_samples=3500))
+
+    if args.source in ("synthetic", "both"):
+        needed = max(args.n_synthetic, 300 if args.source == "synthetic" else args.n_synthetic)
+        print(f"⚙  Generating {needed} synthetic samples ...")
+        samples.extend(
+            generate_synthetic(
+                needed,
+                synthetic_biased_ratio=args.synthetic_biased_ratio,
+                max_per_category=args.max_per_category,
+                multi_token_boost=args.multi_token_boost,
+            )
+        )
+
+    if args.real_data_path:
+        print(f"📥 Loading real JDs from {args.real_data_path} ...")
+        real_texts = load_real_jds(args.real_data_path, max_samples=args.real_max_samples)
+        samples.extend(build_sample(t, "real") for t in real_texts)
+        print(f"   Added {len(real_texts)} real samples")
+
+    if args.biased_category_cap > 0:
+        print(f"⚖️  Applying biased category cap: {args.biased_category_cap}")
+        before_cap = len(samples)
+        samples = rebalance_biased_categories(samples, max_per_category=args.biased_category_cap)
+        print(f"   Samples after category cap: {len(samples)} (from {before_cap})")
+
+    print_distributions(samples)
+    splits = split_samples(samples)
+    for name in ["train", "val", "test"]:
+        before = count_bias(splits[name])
+        print(
+            f"BEFORE REBALANCE ({name}): "
+            f"biased={before['biased']} neutral={before['neutral']} ratio={before['ratio']:.2f}"
+        )
+        splits[name] = rebalance_samples(splits[name], target_ratio=args.target_ratio)
+        after = count_bias(splits[name])
+        print(
+            f"AFTER REBALANCE  ({name}): "
+            f"biased={after['biased']} neutral={after['neutral']} ratio={after['ratio']:.2f}"
+        )
+
+    print("\n🚨 FINAL CHECK BEFORE SAVE")
+    for name in ["train", "val", "test"]:
+        stats = count_bias(splits[name])
+        print(f"{name}: {stats}")
+
+    save_splits(splits, output_dir)
+    verify_saved_splits(output_dir)
     print("\n✅ Data preparation complete.")
 
 
