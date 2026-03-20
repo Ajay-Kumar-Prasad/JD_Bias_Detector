@@ -358,6 +358,24 @@ def build_sample(text: str, source: str = "synthetic") -> Dict:
     return {"tokens": tokens, "labels": labels, "text": text, "source": source}
 
 
+def _norm_text(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def dedupe_samples(samples: List[Dict]) -> tuple[List[Dict], int]:
+    seen = set()
+    out: List[Dict] = []
+    removed = 0
+    for sample in samples:
+        key = _norm_text(sample.get("text", ""))
+        if not key or key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        out.append(sample)
+    return out, removed
+
+
 def _dominant_category(sample: Dict) -> Optional[str]:
     c = Counter()
     for lbl in sample.get("labels", []):
@@ -542,6 +560,22 @@ def verify_saved_splits(output_dir: Path):
         print(f"{name}: {stats}")
 
 
+def enforce_split_uniqueness(splits: Dict[str, List[Dict]]) -> Dict[str, int]:
+    removed = {"train": 0, "val": 0, "test": 0}
+    seen = set()
+    for name in ["train", "val", "test"]:
+        kept: List[Dict] = []
+        for sample in splits[name]:
+            key = _norm_text(sample.get("text", ""))
+            if not key or key in seen:
+                removed[name] += 1
+                continue
+            seen.add(key)
+            kept.append(sample)
+        splits[name] = kept
+    return removed
+
+
 def print_distributions(samples: List[Dict]):
     label_counts = Counter(l for s in samples for l in s["labels"])
     biased = sum(1 for s in samples if any(l != "O" for l in s["labels"]))
@@ -621,6 +655,10 @@ def main():
         samples = rebalance_biased_categories(samples, max_per_category=args.biased_category_cap)
         print(f"   Samples after category cap: {len(samples)} (from {before_cap})")
 
+    samples, removed_global = dedupe_samples(samples)
+    if removed_global:
+        print(f"🧹 Removed {removed_global} duplicate samples before splitting.")
+
     print_distributions(samples)
     splits = split_samples(samples)
     for name in ["train", "val", "test"]:
@@ -635,6 +673,11 @@ def main():
             f"AFTER REBALANCE  ({name}): "
             f"biased={after['biased']} neutral={after['neutral']} ratio={after['ratio']:.2f}"
         )
+
+    removed_by_split = enforce_split_uniqueness(splits)
+    for name in ["train", "val", "test"]:
+        if removed_by_split[name]:
+            print(f"🧹 Removed {removed_by_split[name]} duplicate/leaked samples from {name}.")
 
     print("\n🚨 FINAL CHECK BEFORE SAVE")
     for name in ["train", "val", "test"]:

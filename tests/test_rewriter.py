@@ -63,3 +63,21 @@ def test_rewrite_all_returns_same_count(rewriter_with_mock_llm):
     spans = [SAMPLE_SPAN.copy(), {**SAMPLE_SPAN, "text": "young", "category": "AGEIST"}]
     result = asyncio.run(rewriter_with_mock_llm.rewrite_all(SAMPLE_TEXT, spans))
     assert len(result) == 2
+
+
+def test_template_rewrite_exact_match():
+    rw = BiasRewriter.__new__(BiasRewriter)
+    out = rw._template_rewrite("crush it", "GENDER_CODED")
+    assert out == "excel in the role"
+
+
+def test_template_rewrite_inside_phrase():
+    rw = BiasRewriter.__new__(BiasRewriter)
+    out = rw._template_rewrite("rockstar engineer", "EXCLUSIONARY")
+    assert out == "highly skilled engineer"
+
+
+def test_ageist_phrase_level_override():
+    rw = BiasRewriter.__new__(BiasRewriter)
+    out = rw._template_rewrite("young and hungry", "AGEIST")
+    assert out == "motivated and driven"

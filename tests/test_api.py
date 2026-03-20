@@ -5,7 +5,9 @@ ML models are mocked to avoid loading weights in CI.
 import pytest
 from fastapi.testclient import TestClient
 from unittest.mock import patch, MagicMock, AsyncMock
+from api.routes.analyze import deduplicate_phrases, fix_articles
 
+AUTH = {"x-api-key": "your-secret-key"}
 ENRICHED_SPANS = [
     {
         "text": "rockstar", "start": 22, "end": 30,
@@ -51,14 +53,14 @@ def test_metrics_endpoint(client):
 def test_analyze_returns_200(client):
     resp = client.post("/analyze/", json={
         "text": "We are looking for a rockstar who is young and hungry."
-    })
+    }, headers=AUTH)
     assert resp.status_code == 200
 
 
 def test_analyze_response_structure(client):
     resp = client.post("/analyze/", json={
         "text": "We are looking for a rockstar who is young and hungry."
-    })
+    }, headers=AUTH)
     data = resp.json()
     assert "inclusivity_score"  in data
     assert "flagged_spans"      in data
@@ -69,7 +71,7 @@ def test_analyze_response_structure(client):
 def test_analyze_span_fields(client):
     resp = client.post("/analyze/", json={
         "text": "We are looking for a rockstar who is young and hungry."
-    })
+    }, headers=AUTH)
     for span in resp.json()["flagged_spans"]:
         assert "text"        in span
         assert "category"    in span
@@ -81,16 +83,44 @@ def test_analyze_span_fields(client):
 def test_analyze_score_range(client):
     resp = client.post("/analyze/", json={
         "text": "We are looking for a rockstar who is young and hungry."
-    })
+    }, headers=AUTH)
     score = resp.json()["inclusivity_score"]
     assert 0 <= score <= 100
 
 
 def test_analyze_rejects_short_text(client):
-    resp = client.post("/analyze/", json={"text": "Hi"})
+    resp = client.post("/analyze/", json={"text": "Hi"}, headers=AUTH)
     assert resp.status_code == 422
 
 
 def test_analyze_empty_text_rejected(client):
-    resp = client.post("/analyze/", json={"text": ""})
+    resp = client.post("/analyze/", json={"text": ""}, headers=AUTH)
     assert resp.status_code == 422
+
+
+def test_analyze_requires_api_key(client):
+    resp = client.post("/analyze/", json={"text": "We are looking for a rockstar candidate."})
+    assert resp.status_code == 401
+
+
+def test_batch_analyze_returns_200(client):
+    resp = client.post(
+        "/analyze/batch",
+        json={"texts": [
+            "We are looking for a rockstar engineer.",
+            "We value collaboration and clear communication."
+        ]},
+        headers=AUTH,
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total"] == 2
+    assert len(data["results"]) == 2
+
+
+def test_fix_articles_helper():
+    assert fix_articles("a expert and a engineer") == "an expert and an engineer"
+
+
+def test_deduplicate_phrases_helper():
+    assert deduplicate_phrases("motivated and motivated and collaborative") == "motivated and collaborative"

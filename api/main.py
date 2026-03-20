@@ -6,11 +6,12 @@ Run:
     uvicorn api.main:app --host 0.0.0.0     # production
 """
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import analyze, health
 from api.dependencies import get_classifier, get_rewriter, get_scorer
+from api.security import verify_api_key
 
 
 @asynccontextmanager
@@ -43,5 +44,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-app.include_router(health.router,  tags=["health"])
-app.include_router(analyze.router, prefix="/analyze", tags=["analyze"])
+app.include_router(health.router, tags=["health"])
+app.include_router(
+    analyze.router,
+    prefix="/analyze",
+    tags=["analyze"],
+    dependencies=[Depends(verify_api_key)],
+)

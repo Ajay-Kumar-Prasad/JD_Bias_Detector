@@ -1,7 +1,7 @@
 """
 schemas.py — Pydantic request/response models for the API.
 """
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from typing import List
 
 
@@ -56,3 +56,23 @@ class AnalyzeResponse(BaseModel):
             }
         }
     }}
+
+
+class BatchAnalyzeRequest(BaseModel):
+    texts: List[str] = Field(..., min_length=1, max_length=200)
+
+    @field_validator("texts")
+    @classmethod
+    def validate_texts(cls, value: List[str]) -> List[str]:
+        cleaned = [v.strip() for v in value if isinstance(v, str) and v.strip()]
+        if not cleaned:
+            raise ValueError("At least one non-empty text is required.")
+        too_short = [t for t in cleaned if len(t) < 10]
+        if too_short:
+            raise ValueError("Each text must be at least 10 characters long.")
+        return cleaned
+
+
+class BatchAnalyzeResponse(BaseModel):
+    total: int
+    results: List[AnalyzeResponse]

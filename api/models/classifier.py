@@ -10,7 +10,8 @@ import torch
 from transformers import pipeline, Pipeline
 
 
-MODEL_PATH = os.getenv("CLASSIFIER_MODEL_PATH", "models/deberta-jd-bias-v1")
+# Default to the cleaned v2 model for demo and API usage.
+model_path = os.getenv("CLASSIFIER_MODEL_PATH", "models/deberta-jd-bias-v2-clean")
 DEFAULT_THRESHOLDS = {
     "GENDER_CODED": 0.75,
     "AGEIST": 0.75,
@@ -50,10 +51,10 @@ class BiasClassifier:
     def __init__(self):
         device = 0 if torch.cuda.is_available() else -1
         self._thresholds = _load_thresholds()
-        print(f"[Classifier] Loading model from '{MODEL_PATH}' (device={device})")
+        print(f"[Classifier] Loading model from '{model_path}' (device={device})")
         self._pipe: Pipeline = pipeline(
             "token-classification",
-            model=MODEL_PATH,
+            model=model_path,
             aggregation_strategy="simple",   # merges B-/I- into one span
             device=device,
         )

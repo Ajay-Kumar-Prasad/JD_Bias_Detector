@@ -29,7 +29,7 @@ early_stopping_patience: 2
 
 # ── Logging ───────────────────────────────────────────────────
 logging_steps:          50
-report_to:              wandb       # set to "none" if no W&B account
+report_to:              none       # set to "none" if no W&B account
 
 # ── HuggingFace Hub (optional) ────────────────────────────────
 push_to_hub:            false

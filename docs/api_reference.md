@@ -5,6 +5,18 @@ Interactive docs: `http://localhost:8000/docs`
 
 ---
 
+## Authentication
+
+`/analyze/*` endpoints require API key header:
+
+```http
+x-api-key: your-secret-key
+```
+
+Configure with env var `API_KEY`.
+
+---
+
 ## `GET /health`
 
 Health check. Returns 200 if the API is running.
@@ -23,15 +35,15 @@ Model metadata and evaluation metrics.
 **Response**
 ```json
 {
-  "model":          "models/deberta-jd-bias-v1",
+  "model":          "models/deberta-jd-bias-v2-clean",
   "base_model":     "microsoft/deberta-v3-base",
-  "macro_f1":       0.84,
+  "macro_f1":       0.9612,
   "categories":     ["GENDER_CODED", "AGEIST", "EXCLUSIONARY", "ABILITY_CODED"],
   "per_class_f1":   {
-    "GENDER_CODED":  0.91,
-    "AGEIST":        0.82,
-    "EXCLUSIONARY":  0.79,
-    "ABILITY_CODED": 0.78
+    "GENDER_CODED":  0.9114,
+    "AGEIST":        1.0000,
+    "EXCLUSIONARY":  0.9901,
+    "ABILITY_CODED": 0.9677
   },
   "rewriter_model": "claude-sonnet-4-20250514"
 }
@@ -53,6 +65,11 @@ Analyzes a job description for biased language.
 | Field | Type   | Required | Notes |
 |-------|--------|----------|-------|
 | text  | string | Yes      | Min 10 characters. Raw JD text. |
+
+Required header:
+```http
+x-api-key: your-secret-key
+```
 
 **Response**
 ```json
@@ -99,8 +116,51 @@ Analyzes a job description for biased language.
 
 | Status | Meaning |
 |---|---|
+| 401 | Missing `x-api-key` header. |
+| 403 | Invalid API key. |
 | 422 | Validation error — text too short or missing. |
 | 500 | Internal server error — model or LLM failure. |
+
+---
+
+## `POST /analyze/batch`
+
+Analyze multiple job descriptions in one request.
+
+Required header:
+```http
+x-api-key: your-secret-key
+```
+
+**Request body**
+```json
+{
+  "texts": [
+    "We are looking for a rockstar engineer.",
+    "We value collaboration and clear communication."
+  ]
+}
+```
+
+**Response**
+```json
+{
+  "total": 2,
+  "results": [
+    {
+      "inclusivity_score": 55,
+      "flagged_spans": [],
+      "rewritten_text": "We are looking for a skilled engineer.",
+      "category_breakdown": {
+        "GENDER_CODED": 0,
+        "AGEIST": 0,
+        "EXCLUSIONARY": 1,
+        "ABILITY_CODED": 0
+      }
+    }
+  ]
+}
+```
 
 ---
 

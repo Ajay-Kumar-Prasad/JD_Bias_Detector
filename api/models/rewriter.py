@@ -6,6 +6,7 @@ for each flagged bias span. Falls back gracefully if the API is unavailable.
 import os
 import json
 import asyncio
+import re
 import anthropic
 
 REWRITER_MODEL = os.getenv("REWRITER_MODEL", "claude-sonnet-4-20250514")
@@ -27,6 +28,36 @@ Context (surrounding text): "{context}"
 Respond with this exact JSON structure:
 {{"rewrite": "...", "explanation": "..."}}"""
 
+REWRITE_TEMPLATES = {
+    "GENDER_CODED": {
+        "crush it": "excel in the role",
+        "rockstar": "highly skilled",
+        "aggressive": "results-oriented",
+    },
+    "AGEIST": {
+        "young and hungry": "motivated and driven",
+        "young, hungry": "motivated and driven",
+        "young professional": "early-career professional",
+        "recent graduate": "entry-level candidate",
+        "digital native": "comfortable with digital tools",
+    },
+    "ABILITY_CODED": {
+        "fast-paced": "dynamic",
+        "high pressure": "collaborative",
+    },
+    "EXCLUSIONARY": {
+        "ninja": "specialist",
+        "rockstar": "highly skilled",
+    },
+}
+
+DEFAULT_EXPLANATIONS = {
+    "GENDER_CODED": "This phrase uses gender-coded language that may discourage applicants.",
+    "AGEIST": "This phrase implies age preference, which may exclude experienced candidates.",
+    "EXCLUSIONARY": "This phrase uses exclusionary jargon that may deter underrepresented candidates.",
+    "ABILITY_CODED": "This phrase may discourage candidates with disabilities or health conditions.",
+}
+
 
 class BiasRewriter:
     def __init__(self):
@@ -41,15 +72,40 @@ class BiasRewriter:
 
     def _fallback(self, span: dict) -> dict:
         """Returns a rule-based fallback when the LLM is unavailable."""
-        FALLBACKS = {
-            "GENDER_CODED":  ("skilled professional",   "This phrase uses gender-coded language that may discourage applicants."),
-            "AGEIST":        ("motivated individual",    "This phrase implies age preference, which may exclude experienced candidates."),
-            "EXCLUSIONARY":  ("expert",                  "This phrase uses exclusionary jargon that may deter underrepresented candidates."),
-            "ABILITY_CODED": ("able to manage workload", "This phrase may discourage candidates with disabilities or health conditions."),
-        }
         cat = span.get("category", "EXCLUSIONARY")
-        rewrite, explanation = FALLBACKS.get(cat, ("qualified candidate", "This phrase may exclude qualified applicants."))
+        rewrite = self._template_rewrite(span.get("text", ""), cat) or {
+            "GENDER_CODED": "skilled professional",
+            "AGEIST": "motivated individual",
+            "EXCLUSIONARY": "qualified candidate",
+            "ABILITY_CODED": "able to manage workload",
+        }.get(cat, "qualified candidate")
+        explanation = DEFAULT_EXPLANATIONS.get(cat, "This phrase may exclude qualified applicants.")
         return {**span, "rewrite": rewrite, "explanation": explanation}
+
+    def _template_rewrite(self, phrase: str, category: str) -> str | None:
+        """Returns a category-aware rewrite from deterministic templates when matched."""
+        templates = REWRITE_TEMPLATES.get(category, {})
+        if not templates:
+            return None
+
+        phrase_clean = phrase.strip()
+        phrase_low = phrase_clean.lower()
+        if not phrase_low:
+            return None
+
+        # Prefer exact phrase matches.
+        if phrase_low in templates:
+            return templates[phrase_low]
+
+        # Fallback: replace matched token/phrase inside larger span.
+        for source, target in sorted(templates.items(), key=lambda kv: len(kv[0]), reverse=True):
+            pattern = rf"\b{re.escape(source)}\b"
+            if re.search(pattern, phrase_low):
+                rewritten = re.sub(pattern, target, phrase_clean, flags=re.IGNORECASE)
+                rewritten = re.sub(r"\s+", " ", rewritten).strip()
+                if rewritten and rewritten.lower() != phrase_low:
+                    return rewritten
+        return None
 
     def _call_llm(self, phrase: str, category: str, context: str) -> dict:
         prompt = USER_TEMPLATE.format(
@@ -66,15 +122,23 @@ class BiasRewriter:
 
     def rewrite_span(self, text: str, span: dict) -> dict:
         """Rewrites a single span. Returns the span dict enriched with rewrite + explanation."""
+        template_rewrite = self._template_rewrite(span.get("text", ""), span.get("category", ""))
+        template_expl = DEFAULT_EXPLANATIONS.get(
+            span.get("category", ""),
+            "This phrase may exclude qualified applicants.",
+        )
+
         if self._client is None:
             return self._fallback(span)
         try:
             context = self._context_window(text, span["start"], span["end"])
             payload = self._call_llm(span["text"], span["category"], context)
+            rewrite = str(payload.get("rewrite", "")).strip()
+            explanation = str(payload.get("explanation", "")).strip()
             return {
                 **span,
-                "rewrite":     payload.get("rewrite", span["text"]),
-                "explanation": payload.get("explanation", ""),
+                "rewrite": rewrite or template_rewrite or span["text"],
+                "explanation": explanation or template_expl,
             }
         except (json.JSONDecodeError, KeyError, Exception) as e:
             print(f"[Rewriter] LLM call failed for span '{span['text']}': {e}")

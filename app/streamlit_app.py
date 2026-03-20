@@ -5,10 +5,12 @@ Run:
     streamlit run app/streamlit_app.py
 """
 import json
+import csv
+import io
 import httpx
 import streamlit as st
 
-from app.config import API_URL, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
+from app.config import API_URL, API_KEY, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
 from app.components.sidebar import render_sidebar
 from app.components.highlighter import build_highlighted_html, render_legend
 from app.components.diff_view import build_diff_html, change_summary
@@ -80,6 +82,7 @@ def call_api(text: str) -> dict:
         resp = httpx.post(
             f"{API_URL}/analyze/",
             json={"text": text},
+            headers={"x-api-key": API_KEY},
             timeout=60.0,
         )
         resp.raise_for_status()
@@ -92,6 +95,21 @@ def call_api(text: str) -> dict:
         st.stop()
     except Exception as e:
         st.error(f"API error: {e}")
+        st.stop()
+
+
+def call_batch_api(texts: list[str]) -> dict:
+    try:
+        resp = httpx.post(
+            f"{API_URL}/analyze/batch",
+            json={"texts": texts},
+            headers={"x-api-key": API_KEY},
+            timeout=120.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        st.error(f"Batch API error: {e}")
         st.stop()
 
 
@@ -203,6 +221,25 @@ if analyze_btn and jd_text.strip():
             mime="text/plain",
         )
 
+    # ── Final cleaned JD (always visible when available) ─────
+    if rewritten:
+        st.divider()
+        st.markdown("#### Final cleaned JD")
+        st.text_area(
+            "Cleaned output",
+            value=rewritten,
+            height=220,
+            key="cleaned_jd_text",
+            label_visibility="collapsed",
+        )
+        st.download_button(
+            "⬇ Download cleaned JD",
+            data=rewritten,
+            file_name="cleaned_jd.txt",
+            mime="text/plain",
+            key="download_cleaned_jd",
+        )
+
     # ── Raw JSON ──────────────────────────────────────────────
     if show_raw_json:
         st.divider()
@@ -211,3 +248,60 @@ if analyze_btn and jd_text.strip():
 
 elif analyze_btn and not jd_text.strip():
     st.warning("Please paste a job description before analyzing.")
+
+st.divider()
+st.markdown("## Batch Analyzer")
+st.caption("Upload a CSV, pick the text column, and analyze many job descriptions in one run.")
+
+uploaded = st.file_uploader("CSV file", type=["csv"], key="batch_csv")
+if uploaded is not None:
+    decoded = uploaded.getvalue().decode("utf-8", errors="replace")
+    reader = csv.DictReader(io.StringIO(decoded))
+    rows = list(reader)
+
+    if not rows or not reader.fieldnames:
+        st.warning("CSV appears empty or has no header row.")
+    else:
+        text_col = st.selectbox("Text column", reader.fieldnames, key="batch_text_col")
+        run_batch = st.button("Analyze batch", type="primary", key="batch_btn")
+
+        if run_batch:
+            texts = [str(r.get(text_col, "")).strip() for r in rows]
+            texts = [t for t in texts if t]
+            if not texts:
+                st.warning("No valid text rows found in selected column.")
+            else:
+                with st.spinner(f"Analyzing {len(texts)} job descriptions..."):
+                    result = call_batch_api(texts)
+                results = result.get("results", [])
+
+                output = io.StringIO()
+                writer = csv.writer(output)
+                writer.writerow([
+                    "input_text",
+                    "inclusivity_score",
+                    "gender_coded",
+                    "ageist",
+                    "exclusionary",
+                    "ability_coded",
+                    "rewritten_text",
+                ])
+                for original, item in zip(texts, results):
+                    breakdown = item.get("category_breakdown", {})
+                    writer.writerow([
+                        original,
+                        item.get("inclusivity_score", 0),
+                        breakdown.get("GENDER_CODED", 0),
+                        breakdown.get("AGEIST", 0),
+                        breakdown.get("EXCLUSIONARY", 0),
+                        breakdown.get("ABILITY_CODED", 0),
+                        item.get("rewritten_text", ""),
+                    ])
+
+                st.success(f"Batch complete: {len(results)} analyzed.")
+                st.download_button(
+                    "⬇ Download batch results",
+                    data=output.getvalue(),
+                    file_name="jd_bias_batch_results.csv",
+                    mime="text/csv",
+                )
