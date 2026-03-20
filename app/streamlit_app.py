@@ -7,13 +7,21 @@ Run:
 import json
 import csv
 import io
+from pathlib import Path
 import httpx
 import streamlit as st
 
-from app.config import API_URL, API_KEY, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
-from app.components.sidebar import render_sidebar
-from app.components.highlighter import build_highlighted_html, render_legend
-from app.components.diff_view import build_diff_html, change_summary
+try:
+    from app.config import API_URL, API_KEY, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
+    from app.components.sidebar import render_sidebar
+    from app.components.highlighter import build_highlighted_html, render_legend
+    from app.components.diff_view import build_diff_html, change_summary
+except ModuleNotFoundError:
+    # Support running from inside `app/` via `streamlit run streamlit_app.py`.
+    from config import API_URL, API_KEY, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
+    from components.sidebar import render_sidebar
+    from components.highlighter import build_highlighted_html, render_legend
+    from components.diff_view import build_diff_html, change_summary
 
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
@@ -24,12 +32,15 @@ st.set_page_config(
 )
 
 # ── Custom CSS ────────────────────────────────────────────────
-with open("app/assets/style.css") as f:
+ASSETS_DIR = Path(__file__).resolve().parent / "assets"
+with (ASSETS_DIR / "style.css").open(encoding="utf-8") as f:
     st.markdown(f"<style>{f.read()}</style>", unsafe_allow_html=True)
 
 # ── Sidebar ───────────────────────────────────────────────────
 settings = render_sidebar()
 conf_threshold = settings["confidence_threshold"]
+auto_rewrite_threshold = settings["auto_rewrite_threshold"]
+suggestion_threshold = settings["suggestion_threshold"]
 show_diff      = settings["show_diff"]
 show_raw_json  = settings["show_raw_json"]
 
@@ -77,11 +88,15 @@ st.divider()
 
 
 # ── Analysis ──────────────────────────────────────────────────
-def call_api(text: str) -> dict:
+def call_api(text: str, auto_threshold: float, suggest_threshold: float) -> dict:
     try:
         resp = httpx.post(
             f"{API_URL}/analyze/",
-            json={"text": text},
+            json={
+                "text": text,
+                "auto_rewrite_threshold": auto_threshold,
+                "suggestion_threshold": suggest_threshold,
+            },
             headers={"x-api-key": API_KEY},
             timeout=60.0,
         )
@@ -89,8 +104,8 @@ def call_api(text: str) -> dict:
         return resp.json()
     except httpx.ConnectError:
         st.error(
-            "Cannot connect to the API. Make sure the FastAPI server is running:\n"
-            "```\nuvicorn api.main:app --reload\n```"
+            f"Cannot connect to API at {API_URL}. Make sure the FastAPI server is running with a matching host/port:\n"
+            "```\nuvicorn api.main:app --reload --port 8001\n```"
         )
         st.stop()
     except Exception as e:
@@ -98,11 +113,15 @@ def call_api(text: str) -> dict:
         st.stop()
 
 
-def call_batch_api(texts: list[str]) -> dict:
+def call_batch_api(texts: list[str], auto_threshold: float, suggest_threshold: float) -> dict:
     try:
         resp = httpx.post(
             f"{API_URL}/analyze/batch",
-            json={"texts": texts},
+            json={
+                "texts": texts,
+                "auto_rewrite_threshold": auto_threshold,
+                "suggestion_threshold": suggest_threshold,
+            },
             headers={"x-api-key": API_KEY},
             timeout=120.0,
         )
@@ -113,9 +132,17 @@ def call_batch_api(texts: list[str]) -> dict:
         st.stop()
 
 
+def confidence_band(confidence: float) -> str:
+    if confidence > 0.9:
+        return "high"
+    if confidence > 0.75:
+        return "medium"
+    return "low"
+
+
 if analyze_btn and jd_text.strip():
     with st.spinner("Analyzing..."):
-        result = call_api(jd_text)
+        result = call_api(jd_text, auto_rewrite_threshold, suggestion_threshold)
 
     # Filter spans by confidence threshold
     all_spans    = result.get("flagged_spans", [])
@@ -124,6 +151,9 @@ if analyze_btn and jd_text.strip():
     score        = result.get("inclusivity_score", 0)
     breakdown    = result.get("category_breakdown", {})
     rewritten    = result.get("rewritten_text", "")
+    auto_count = sum(1 for s in all_spans if s.get("rewrite_mode") == "auto_replace")
+    suggest_count = sum(1 for s in all_spans if s.get("rewrite_mode") == "suggest")
+    ignore_count = sum(1 for s in all_spans if s.get("rewrite_mode") == "ignore")
 
     # ── Score + breakdown ──────────────────────────────────────
     ring_class = (
@@ -153,6 +183,7 @@ if analyze_btn and jd_text.strip():
 
     if hidden_count:
         st.caption(f"ℹ️ {hidden_count} low-confidence flag(s) hidden (threshold: {conf_threshold:.0%}). Adjust in sidebar.")
+    st.caption(f"{auto_count} auto-replaced · {suggest_count} suggested · {ignore_count} ignored")
 
     st.divider()
 
@@ -180,12 +211,20 @@ if analyze_btn and jd_text.strip():
             cat   = span["category"]
             color = CATEGORY_COLORS.get(cat, "#ccc")
             label = CATEGORY_LABELS.get(cat, cat)
+            rewrite_mode = span.get("rewrite_mode", "auto_replace")
+            rewrite_conf = float(span.get("rewrite_confidence", span["confidence"]))
+            conf_band = confidence_band(rewrite_conf)
+            action_label = (
+                "Auto-replace"
+                if rewrite_mode == "auto_replace"
+                else "Suggestion only"
+            )
             st.markdown(
                 f'<div class="flag-card">'
                 f'<div class="flag-phrase" style="color:{color}">"{span["text"]}"</div>'
-                f'<div class="flag-meta">{label} · {span["confidence"]:.0%} confidence</div>'
+                f'<div class="flag-meta">{label} · {span["confidence"]:.0%} detection · {rewrite_conf:.0%} rewrite · {action_label} ({conf_band} confidence)</div>'
                 f'<div class="flag-explanation">{span["explanation"]}</div>'
-                f'<div>Rewrite as: <span class="flag-rewrite">{span["rewrite"]}</span></div>'
+                f'<div>{"Rewrite as" if rewrite_mode == "auto_replace" else "Suggested rewrite"}: <span class="flag-rewrite">{span["rewrite"]}</span></div>'
                 f'</div>',
                 unsafe_allow_html=True,
             )
@@ -197,7 +236,9 @@ if analyze_btn and jd_text.strip():
         st.markdown("#### Side-by-side comparison")
         summary = change_summary(jd_text, rewritten)
         st.caption(
-            f"{summary['replaced']} phrase(s) rewritten · "
+            f"{auto_count} auto-replaced · "
+            f"{suggest_count} suggested · "
+            f"{ignore_count} ignored · "
             f"{summary['added']} word(s) added · "
             f"{summary['removed']} word(s) removed"
         )
@@ -272,7 +313,7 @@ if uploaded is not None:
                 st.warning("No valid text rows found in selected column.")
             else:
                 with st.spinner(f"Analyzing {len(texts)} job descriptions..."):
-                    result = call_batch_api(texts)
+                    result = call_batch_api(texts, auto_rewrite_threshold, suggestion_threshold)
                 results = result.get("results", [])
 
                 output = io.StringIO()
@@ -284,10 +325,17 @@ if uploaded is not None:
                     "ageist",
                     "exclusionary",
                     "ability_coded",
+                    "auto_replaced",
+                    "suggested",
+                    "ignored",
                     "rewritten_text",
                 ])
                 for original, item in zip(texts, results):
                     breakdown = item.get("category_breakdown", {})
+                    spans = item.get("flagged_spans", [])
+                    auto_count = sum(1 for s in spans if s.get("rewrite_mode") == "auto_replace")
+                    suggest_count = sum(1 for s in spans if s.get("rewrite_mode") == "suggest")
+                    ignore_count = sum(1 for s in spans if s.get("rewrite_mode") == "ignore")
                     writer.writerow([
                         original,
                         item.get("inclusivity_score", 0),
@@ -295,6 +343,9 @@ if uploaded is not None:
                         breakdown.get("AGEIST", 0),
                         breakdown.get("EXCLUSIONARY", 0),
                         breakdown.get("ABILITY_CODED", 0),
+                        auto_count,
+                        suggest_count,
+                        ignore_count,
                         item.get("rewritten_text", ""),
                     ])
 

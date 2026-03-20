@@ -7,6 +7,12 @@ from typing import List
 
 class AnalyzeRequest(BaseModel):
     text: str = Field(..., min_length=10, description="Raw job description text.")
+    auto_rewrite_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Confidence threshold for auto-replace."
+    )
+    suggestion_threshold: float | None = Field(
+        default=None, ge=0.0, le=1.0, description="Confidence threshold for suggestion mode."
+    )
 
     model_config = {"json_schema_extra": {
         "example": {
@@ -24,6 +30,8 @@ class FlaggedSpan(BaseModel):
     end:         int
     category:    str   # GENDER_CODED | AGEIST | EXCLUSIONARY | ABILITY_CODED
     confidence:  float
+    rewrite_confidence: float
+    rewrite_mode: str   # auto_replace | suggest | ignore
     explanation: str
     rewrite:     str
 
@@ -47,6 +55,7 @@ class AnalyzeResponse(BaseModel):
             "flagged_spans": [{
                 "text": "rockstar", "start": 27, "end": 35,
                 "category": "EXCLUSIONARY", "confidence": 0.96,
+                "rewrite_confidence": 0.96, "rewrite_mode": "auto_replace",
                 "explanation": "Vague hyperbolic language that signals cultural gatekeeping.",
                 "rewrite": "skilled engineer",
             }],
@@ -60,6 +69,8 @@ class AnalyzeResponse(BaseModel):
 
 class BatchAnalyzeRequest(BaseModel):
     texts: List[str] = Field(..., min_length=1, max_length=200)
+    auto_rewrite_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
+    suggestion_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
     @field_validator("texts")
     @classmethod

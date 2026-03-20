@@ -9,9 +9,15 @@ from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api.routes import analyze, health
-from api.dependencies import get_classifier, get_rewriter, get_scorer
-from api.security import verify_api_key
+try:
+    from api.routes import analyze, health
+    from api.dependencies import get_classifier, get_rewriter, get_scorer
+    from api.security import verify_api_key
+except ModuleNotFoundError:
+    # Support running from inside `api/` via `uvicorn main:app`.
+    from routes import analyze, health
+    from dependencies import get_classifier, get_rewriter, get_scorer
+    from security import verify_api_key
 
 
 @asynccontextmanager
@@ -51,3 +57,13 @@ app.include_router(
     tags=["analyze"],
     dependencies=[Depends(verify_api_key)],
 )
+
+
+@app.get("/", summary="API root")
+def root():
+    return {
+        "name": "JD Bias Detector API",
+        "status": "ok",
+        "docs": "/docs",
+        "health": "/health",
+    }

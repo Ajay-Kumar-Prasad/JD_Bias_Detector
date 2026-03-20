@@ -4,7 +4,10 @@ Renders an HTML string with biased spans highlighted inline.
 Each span gets a colored background badge matching its bias category.
 """
 import html
-from app.config import CATEGORY_COLORS, CATEGORY_LABELS
+try:
+    from app.config import CATEGORY_COLORS, CATEGORY_LABELS
+except ModuleNotFoundError:
+    from config import CATEGORY_COLORS, CATEGORY_LABELS
 
 
 def build_highlighted_html(original_text: str, flagged_spans: list) -> str:
