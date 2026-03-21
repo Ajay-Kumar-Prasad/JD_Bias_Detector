@@ -12,16 +12,18 @@ import httpx
 import streamlit as st
 
 try:
-    from app.config import API_URL, API_KEY, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
+    from app.config import APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
     from app.components.sidebar import render_sidebar
     from app.components.highlighter import build_highlighted_html, render_legend
     from app.components.diff_view import build_diff_html, change_summary
 except ModuleNotFoundError:
     # Support running from inside `app/` via `streamlit run streamlit_app.py`.
-    from config import API_URL, API_KEY, APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
+    from config import APP_TITLE, APP_ICON, CATEGORY_COLORS, CATEGORY_LABELS
     from components.sidebar import render_sidebar
     from components.highlighter import build_highlighted_html, render_legend
     from components.diff_view import build_diff_html, change_summary
+
+API_URL = "https://jd-bias-detector.onrender.com"
 
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
@@ -97,7 +99,7 @@ def call_api(text: str, auto_threshold: float, suggest_threshold: float) -> dict
                 "auto_rewrite_threshold": auto_threshold,
                 "suggestion_threshold": suggest_threshold,
             },
-            headers={"x-api-key": API_KEY},
+            headers={"x-api-key": st.secrets["API_KEY"]},
             timeout=60.0,
         )
         resp.raise_for_status()
@@ -122,7 +124,7 @@ def call_batch_api(texts: list[str], auto_threshold: float, suggest_threshold: f
                 "auto_rewrite_threshold": auto_threshold,
                 "suggestion_threshold": suggest_threshold,
             },
-            headers={"x-api-key": API_KEY},
+            headers={"x-api-key": st.secrets["API_KEY"]},
             timeout=120.0,
         )
         resp.raise_for_status()
