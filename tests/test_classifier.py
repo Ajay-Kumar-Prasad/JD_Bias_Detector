@@ -8,16 +8,16 @@ from api.models.classifier import BiasClassifier
 
 
 MOCK_PIPELINE_OUTPUT = [
-    {"word": "rockstar", "start": 10, "end": 18,
-     "entity_group": "EXCLUSIONARY", "score": 0.96},
-    {"word": "young and hungry", "start": 26, "end": 42,
-     "entity_group": "AGEIST", "score": 0.91},
+    {"label": "EXCLUSIONARY", "score": 0.96},
+    {"label": "NEUTRAL", "score": 0.04},
 ]
 
 
 @pytest.fixture
 def classifier():
-    with patch("api.models.classifier.pipeline") as mock_pipe:
+    with patch("api.models.classifier.AutoTokenizer.from_pretrained"), \
+         patch("api.models.classifier.AutoModelForSequenceClassification.from_pretrained"), \
+         patch("api.models.classifier.pipeline") as mock_pipe:
         mock_pipe.return_value = MagicMock(return_value=MOCK_PIPELINE_OUTPUT)
         clf = BiasClassifier()
         clf._pipe = MagicMock(return_value=MOCK_PIPELINE_OUTPUT)
@@ -31,7 +31,7 @@ def test_predict_returns_list(classifier):
 
 def test_predict_span_structure(classifier):
     result = classifier.predict("We need a rockstar who is young and hungry.")
-    assert len(result) == 2
+    assert len(result) == 1
     span = result[0]
     assert "text"       in span
     assert "start"      in span

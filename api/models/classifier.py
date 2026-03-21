@@ -5,15 +5,17 @@ Loaded once via dependency injection (see dependencies.py).
 """
 import os
 import json
-import re
 import math
-from pathlib import Path
 import torch
-from transformers import pipeline, Pipeline
+from transformers import (
+    pipeline,
+    Pipeline,
+    AutoTokenizer,
+    AutoModelForSequenceClassification,
+)
 
 
-# Default to the cleaned v2 model for demo and API usage.
-RAW_MODEL_PATH = os.getenv("CLASSIFIER_MODEL_PATH", "models/deberta-jd-bias-v2-clean")
+MODEL_NAME = "Ajay-Kumar-Prasad/jd-bias-detector"
 DEFAULT_THRESHOLDS = {
     "GENDER_CODED": 0.75,
     "AGEIST": 0.75,
@@ -21,18 +23,8 @@ DEFAULT_THRESHOLDS = {
     "EXCLUSIONARY": 0.75,
 }
 MIN_CONFIDENCE = float(os.getenv("CLASSIFIER_MIN_CONFIDENCE", "0.60"))
-SINGLE_TOKEN_MIN_CONFIDENCE = float(
-    os.getenv("CLASSIFIER_SINGLE_TOKEN_MIN_CONFIDENCE", "0.75")
-)
 CALIBRATION_TEMPERATURE = max(float(os.getenv("CLASSIFIER_CALIBRATION_TEMPERATURE", "1.0")), 1e-6)
-STOP_WORDS = {
-    w.strip().lower()
-    for w in os.getenv(
-        "CLASSIFIER_STOP_WORDS",
-        "in,on,at,by,for,to,from,with,work,handle,level,quickly,strong",
-    ).split(",")
-    if w.strip()
-}
+NEUTRAL_LABELS = {"NEUTRAL", "NON_BIASED", "NOT_BIASED", "O", "LABEL_0"}
 
 
 def _apply_temperature_scaling(prob: float, temperature: float) -> float:
@@ -44,46 +36,6 @@ def _apply_temperature_scaling(prob: float, temperature: float) -> float:
     logit = math.log(p / (1 - p))
     calibrated = 1 / (1 + math.exp(-(logit / temperature)))
     return float(calibrated)
-
-
-def _resolve_model_path(raw_path: str) -> str:
-    """
-    Resolve local model folders robustly across different working directories.
-
-    Supports:
-    - absolute local paths
-    - relative local paths from cwd
-    - relative local paths from project root (when running from `api/`)
-    - Hugging Face repo IDs (returned unchanged)
-    """
-    candidate = Path(raw_path).expanduser()
-    if candidate.is_absolute() and candidate.is_dir():
-        return str(candidate)
-
-    cwd_candidate = (Path.cwd() / candidate).resolve()
-    if cwd_candidate.is_dir():
-        return str(cwd_candidate)
-
-    project_root = Path(__file__).resolve().parents[2]
-    root_candidate = (project_root / candidate).resolve()
-    if root_candidate.is_dir():
-        return str(root_candidate)
-
-    looks_like_local = (
-        raw_path.startswith(("/", "./", "../", "~/"))
-        or raw_path.startswith("models/")
-        or raw_path.startswith("models\\")
-    )
-    if looks_like_local:
-        raise FileNotFoundError(
-            "CLASSIFIER_MODEL_PATH points to a local folder that was not found. "
-            f"Checked: '{cwd_candidate}' and '{root_candidate}'. "
-            "Set CLASSIFIER_MODEL_PATH to an existing local directory or a valid "
-            "Hugging Face repo id."
-        )
-
-    # Treat as HF repo id, e.g. "org/repo".
-    return raw_path
 
 
 def _load_thresholds() -> dict:
@@ -105,45 +57,27 @@ class BiasClassifier:
     def __init__(self):
         device = 0 if torch.cuda.is_available() else -1
         self._thresholds = _load_thresholds()
-        model_path = _resolve_model_path(RAW_MODEL_PATH)
-        print(f"[Classifier] Loading model from '{model_path}' (device={device})")
+        print(f"[Classifier] Loading model from '{MODEL_NAME}' (device={device})")
         print(f"[Classifier] Calibration temperature: {CALIBRATION_TEMPERATURE}")
+        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
         self._pipe: Pipeline = pipeline(
-            "token-classification",
-            model=model_path,
-            aggregation_strategy="simple",   # merges B-/I- into one span
+            "text-classification",
+            model=self.model,
+            tokenizer=self.tokenizer,
             device=device,
+            top_k=None,
         )
         print(f"[Classifier] Category thresholds: {self._thresholds}")
         print("[Classifier] Ready.")
 
     @staticmethod
-    def _token_count(text: str) -> int:
-        return len(re.findall(r"\w+", text))
-
-    @staticmethod
-    def _can_merge(prev: dict, cur: dict, source_text: str) -> bool:
-        if prev["entity_group"] != cur["entity_group"]:
-            return False
-        if cur["start"] < prev["end"]:
-            return True
-        bridge = source_text[prev["end"] : cur["start"]]
-        # Merge spans separated only by whitespace/hyphen/slash.
-        return bool(bridge) and all(ch.isspace() or ch in "-/" for ch in bridge)
-
-    def _merge_adjacent_spans(self, entities: list[dict], source_text: str) -> list[dict]:
-        if not entities:
-            return []
-        ordered = sorted(entities, key=lambda e: (e["start"], e["end"]))
-        merged = [ordered[0].copy()]
-        for cur in ordered[1:]:
-            prev = merged[-1]
-            if self._can_merge(prev, cur, source_text):
-                prev["end"] = max(prev["end"], cur["end"])
-                prev["score"] = max(float(prev["score"]), float(cur["score"]))
-            else:
-                merged.append(cur.copy())
-        return merged
+    def _normalize_label(raw_label: str) -> str:
+        label = str(raw_label).upper().strip()
+        for prefix in ("B-", "I-", "S-", "E-", "L-", "U-"):
+            if label.startswith(prefix):
+                label = label[len(prefix):]
+        return label
 
     def predict(self, text: str) -> list[dict]:
         """
@@ -162,38 +96,34 @@ class BiasClassifier:
         # Quick normalization for common split phrase.
         model_text = text.replace("fast paced", "fast-paced").replace("Fast paced", "Fast-paced")
 
-        raw = self._pipe(model_text)
-        merged = self._merge_adjacent_spans(raw, model_text)
-        spans = []
-        for entity in merged:
-            category = entity["entity_group"]
+        predictions = self._pipe(model_text, truncation=True)
+        if not predictions:
+            return []
+
+        if isinstance(predictions[0], list):
+            candidates = predictions[0]
+        else:
+            candidates = predictions
+
+        ranked = sorted(candidates, key=lambda p: float(p.get("score", 0.0)), reverse=True)
+        for candidate in ranked:
+            normalized = self._normalize_label(candidate.get("label", ""))
             confidence = round(
-                _apply_temperature_scaling(float(entity["score"]), CALIBRATION_TEMPERATURE),
+                _apply_temperature_scaling(float(candidate.get("score", 0.0)), CALIBRATION_TEMPERATURE),
                 4,
             )
-            threshold = max(float(self._thresholds.get(category, 0.6)), MIN_CONFIDENCE)
+            if normalized in NEUTRAL_LABELS:
+                continue
+            threshold = max(float(self._thresholds.get(normalized, 0.6)), MIN_CONFIDENCE)
             if confidence < threshold:
                 continue
-            start = int(entity["start"])
-            end = int(entity["end"])
-            span_text = model_text[start:end].strip()
-            if not span_text:
-                continue
-            token_count = self._token_count(span_text)
-            if token_count == 1 and confidence < SINGLE_TOKEN_MIN_CONFIDENCE:
-                continue
-            if token_count == 1 and span_text.lower() in STOP_WORDS:
-                continue
-
-            # Pragmatic correction for common confusion.
-            if span_text.lower() in {"demanding", "intense"}:
-                category = "ABILITY_CODED"
-
-            spans.append({
-                "text":       span_text,
-                "start":      start,
-                "end":        end,
-                "category":   category,
+            category = normalized if normalized in DEFAULT_THRESHOLDS else "EXCLUSIONARY"
+            return [{
+                "text": model_text.strip(),
+                "start": 0,
+                "end": len(model_text),
+                "category": category,
                 "confidence": confidence,
-            })
-        return spans
+            }]
+
+        return []

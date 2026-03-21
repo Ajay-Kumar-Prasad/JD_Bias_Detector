@@ -6,6 +6,7 @@ import re
 from fastapi import APIRouter
 
 router = APIRouter()
+CLASSIFIER_MODEL_NAME = "Ajay-Kumar-Prasad/jd-bias-detector"
 
 @router.get("/health", summary="Health check")
 def health():
@@ -35,7 +36,7 @@ def metrics():
         pass
 
     return {
-        "model":          os.getenv("CLASSIFIER_MODEL_PATH", "models/deberta-jd-bias-v2-clean"),
+        "model":          CLASSIFIER_MODEL_NAME,
         "base_model":     "microsoft/deberta-v3-base",
         "macro_f1":       macro_f1,
         "categories":     ["GENDER_CODED", "AGEIST", "EXCLUSIONARY", "ABILITY_CODED"],
