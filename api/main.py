@@ -11,23 +11,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from api.routes import analyze, health
-    from api.dependencies import get_classifier, get_rewriter, get_scorer
+    from api.dependencies import get_rewriter, get_scorer
     from api.security import verify_api_key
 except ModuleNotFoundError:
     # Support running from inside `api/` via `uvicorn main:app`.
     from routes import analyze, health
-    from dependencies import get_classifier, get_rewriter, get_scorer
+    from dependencies import get_rewriter, get_scorer
     from security import verify_api_key
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Pre-load models at startup so the first request isn't slow."""
-    print("[Startup] Loading models...")
-    get_classifier()
+    """Load remaining shared services at startup."""
+    print("[Startup] Loading services...")
     get_rewriter()
     get_scorer()
-    print("[Startup] All models ready.")
+    print("[Startup] Services ready.")
     yield
     print("[Shutdown] Cleaning up.")
 

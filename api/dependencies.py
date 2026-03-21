@@ -1,9 +1,10 @@
 """
 dependencies.py — FastAPI dependency injection
-Provides singleton instances of the classifier and rewriter
-so models are loaded once at startup, not per-request.
+Provides singleton instances of shared models/services
+with lazy initialization on first use.
 """
 from functools import lru_cache
+from typing import Optional
 
 try:
     from api.models.classifier import BiasClassifier
@@ -16,9 +17,15 @@ except ModuleNotFoundError:
     from models.scorer import BiasScorer
 
 
-@lru_cache(maxsize=1)
+model: Optional[BiasClassifier] = None
+
+
 def get_classifier() -> BiasClassifier:
-    return BiasClassifier()
+    global model
+    if model is None:
+        print("Loading model...")
+        model = BiasClassifier()
+    return model
 
 
 @lru_cache(maxsize=1)
