@@ -170,6 +170,16 @@ pip install -r requirements-backend.txt
 uvicorn api.main:app --reload --port 8001
 ```
 
+### Azure App Service (required setting)
+
+Add this Application Setting in Azure App Service:
+
+```text
+WEBSITES_CONTAINER_START_TIME_LIMIT=600
+```
+
+Without this, Azure may terminate slow cold starts before the container is ready.
+
 ---
 
 ### Run UI

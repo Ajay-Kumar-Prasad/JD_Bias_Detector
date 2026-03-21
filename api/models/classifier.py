@@ -6,13 +6,6 @@ Loaded once via dependency injection (see dependencies.py).
 import os
 import json
 import math
-import torch
-from transformers import (
-    pipeline,
-    Pipeline,
-    AutoTokenizer,
-    AutoModelForSequenceClassification,
-)
 
 
 MODEL_NAME = "Ajay-Kumar-Prasad/jd-bias-detector"
@@ -55,13 +48,20 @@ def _load_thresholds() -> dict:
 
 class BiasClassifier:
     def __init__(self):
+        import torch
+        from transformers import (
+            pipeline,
+            AutoTokenizer,
+            AutoModelForSequenceClassification,
+        )
+
         device = 0 if torch.cuda.is_available() else -1
         self._thresholds = _load_thresholds()
         print(f"[Classifier] Loading model from '{MODEL_NAME}' (device={device})")
         print(f"[Classifier] Calibration temperature: {CALIBRATION_TEMPERATURE}")
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
         self.model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
-        self._pipe: Pipeline = pipeline(
+        self._pipe = pipeline(
             "text-classification",
             model=self.model,
             tokenizer=self.tokenizer,

@@ -6,6 +6,8 @@ services:
     ports:
       - "8000:8000"
     env_file: .env
+    environment:
+      - WEBSITES_CONTAINER_START_TIME_LIMIT=600
     volumes:
       - ./models:/app/models
     healthcheck:

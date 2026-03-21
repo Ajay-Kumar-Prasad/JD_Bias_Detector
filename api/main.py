@@ -5,30 +5,16 @@ Run:
     uvicorn api.main:app --reload           # dev
     uvicorn api.main:app --host 0.0.0.0     # production
 """
-from contextlib import asynccontextmanager
 from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
     from api.routes import analyze, health
-    from api.dependencies import get_rewriter, get_scorer
     from api.security import verify_api_key
 except ModuleNotFoundError:
     # Support running from inside `api/` via `uvicorn main:app`.
     from routes import analyze, health
-    from dependencies import get_rewriter, get_scorer
     from security import verify_api_key
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Load remaining shared services at startup."""
-    print("[Startup] Loading services...")
-    get_rewriter()
-    get_scorer()
-    print("[Startup] Services ready.")
-    yield
-    print("[Shutdown] Cleaning up.")
 
 
 app = FastAPI(
@@ -39,7 +25,6 @@ app = FastAPI(
         "and an inclusivity score."
     ),
     version="0.1.0",
-    lifespan=lifespan,
 )
 
 app.add_middleware(

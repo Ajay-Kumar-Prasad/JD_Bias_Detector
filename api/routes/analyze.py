@@ -4,6 +4,7 @@ Full pipeline: classify → rewrite → score → return.
 """
 import os
 import re
+from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends
 
 try:
@@ -14,9 +15,6 @@ try:
         BatchAnalyzeResponse,
         CategoryBreakdown,
     )
-    from api.models.classifier import BiasClassifier
-    from api.models.rewriter import BiasRewriter
-    from api.models.scorer import BiasScorer
     from api.dependencies import get_classifier, get_rewriter, get_scorer
 except ModuleNotFoundError:
     # Support running from inside `api/` via `uvicorn main:app`.
@@ -27,10 +25,17 @@ except ModuleNotFoundError:
         BatchAnalyzeResponse,
         CategoryBreakdown,
     )
-    from models.classifier import BiasClassifier
-    from models.rewriter import BiasRewriter
-    from models.scorer import BiasScorer
     from dependencies import get_classifier, get_rewriter, get_scorer
+
+if TYPE_CHECKING:
+    try:
+        from api.models.classifier import BiasClassifier
+        from api.models.rewriter import BiasRewriter
+        from api.models.scorer import BiasScorer
+    except ModuleNotFoundError:
+        from models.classifier import BiasClassifier
+        from models.rewriter import BiasRewriter
+        from models.scorer import BiasScorer
 
 router = APIRouter()
 MAX_SPANS = 10
@@ -129,9 +134,9 @@ def _apply_rewrite_policy(
 
 async def _analyze_text(
     text: str,
-    classifier: BiasClassifier,
-    rewriter: BiasRewriter,
-    scorer: BiasScorer,
+    classifier: "BiasClassifier",
+    rewriter: "BiasRewriter",
+    scorer: "BiasScorer",
     auto_threshold: float | None = None,
     suggestion_threshold: float | None = None,
 ) -> AnalyzeResponse:
@@ -160,9 +165,9 @@ async def _analyze_text(
 @router.post("/", response_model=AnalyzeResponse, summary="Analyze a job description for bias")
 async def analyze(
     request:    AnalyzeRequest,
-    classifier: BiasClassifier = Depends(get_classifier),
-    rewriter:   BiasRewriter   = Depends(get_rewriter),
-    scorer:     BiasScorer     = Depends(get_scorer),
+    classifier: "BiasClassifier" = Depends(get_classifier),
+    rewriter:   "BiasRewriter"   = Depends(get_rewriter),
+    scorer:     "BiasScorer"     = Depends(get_scorer),
 ):
     return await _analyze_text(
         request.text,
@@ -181,9 +186,9 @@ async def analyze(
 )
 async def analyze_batch(
     request: BatchAnalyzeRequest,
-    classifier: BiasClassifier = Depends(get_classifier),
-    rewriter: BiasRewriter = Depends(get_rewriter),
-    scorer: BiasScorer = Depends(get_scorer),
+    classifier: "BiasClassifier" = Depends(get_classifier),
+    rewriter: "BiasRewriter" = Depends(get_rewriter),
+    scorer: "BiasScorer" = Depends(get_scorer),
 ):
     results = []
     for text in request.texts:
